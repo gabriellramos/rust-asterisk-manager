@@ -269,6 +269,17 @@ pub struct ManagerBuilder {
 /// # Example
 ///
 /// ```
+/// use asterisk_manager::ManagerBuilder;
+/// use asterisk_manager::ManagerOptions;
+///
+/// let options = ManagerOptions {
+///     port: 5038,
+///     host: "example.com".to_string(),
+///     username: "admin".to_string(),
+///     password: "password".to_string(),
+///     events: false,
+/// };
+///
 /// let manager = ManagerBuilder::new(options)
 ///     .on_event("event_name", Box::new(|value| {
 ///         // handle event
@@ -320,40 +331,12 @@ impl ManagerBuilder {
     }
 
     /// Registers a callback for all raw events.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let manager = ManagerBuilder::new(options)
-    ///    .on_all_response_events(Box::new(|value| {
-    ///       println!("Raw event received: {}", value);
-    ///   }))
-    ///  .build();
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `callback` - A callback function that receives a `Value` object.
     pub fn on_all_raw_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
         self.raw_event_callback = Some(callback);
         self
     }
 
     /// Registers a callback for all response events by actions sended to AMI Asterisk.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let manager = ManagerBuilder::new(options)
-    ///    .on_all_response_events(Box::new(|value| {
-    ///       println!("Response event received: {}", value);
-    ///   }))
-    ///  .build();
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `callback` - A callback function that receives a `Value` object.
     pub fn on_all_response_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
         self.response_event_callback = Some(callback);
         self
