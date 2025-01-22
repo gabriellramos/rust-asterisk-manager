@@ -93,7 +93,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-asterisk_manager = { path = "path/to/asterisk-manager" }
+asterisk_manager = "0.1.1"
 ```
 
 ## Based On

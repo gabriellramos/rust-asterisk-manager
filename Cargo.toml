@@ -1,8 +1,14 @@
 [package]
 name = "asterisk-manager"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-authors = ["Gabriel Nascimento"]
+authors = ["Gabriel Nascimento <gabrielramosnascimento195@gmail.com>"]
+description = "This library provides an implementation to manage connections and authentication with an Asterisk Call Manager (AMI) server"
+readme = "README.md"
+repository = "https://github.com/gabriellramos/rust-asterisk-manager"
+license-file = "LICENSE"
+keywords = ["asterisk", "ami", "voip", "manager"]
+categories = ["network-programming", "text-processing", "os", "development-tools", "api-bindings"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
