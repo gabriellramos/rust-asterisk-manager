@@ -1,101 +1,58 @@
-# Asterisk Manager Library
+# Asterisk Manager Library (v1.0.0)
 
-This library provides an implementation to manage connections and authentication with an Asterisk Call Manager (AMI) server.
+Esta biblioteca fornece uma implementação moderna, fortemente tipada e baseada em streams para interação com o Asterisk Manager Interface (AMI).
 
 ## Features
 
-- **Reconnection Logic**: Automatically handles reconnections to the AMI server in case of connection drops.
-- **Event Handling**: Processes various AMI events and provides a mechanism to handle them.
-- **Asynchronous Operations**: Utilizes Tokio for non-blocking, asynchronous operations.
-- **Participant Management**: Manages call participants and their states efficiently.
-- **JSON Data Handling**: Formats and processes data into JSON objects for easy manipulation and integration.
-- **Event Callbacks**: Allows registration of callbacks for specific events, all events, raw events, and response events.
+- **Mensagens AMI tipadas**: Actions, Events e Responses como enums/structs Rust.
+- **API baseada em Stream**: Consumo de eventos via tokio_stream.
+- **Operações assíncronas**: Utiliza Tokio.
+- **Reconexão automática** e **correlação ActionID/Response**.
 
-## Usage Example
+## Exemplo de uso
 
 ```rust,no_run
-use asterisk_manager::{ManagerBuilder, ManagerOptions};
-use tokio::runtime::Runtime;
-use serde_json::Value;
+use asterisk_manager::{Manager, ManagerOptions, AmiAction};
+use tokio_stream::StreamExt;
 
-fn main() {
-    let rt = Runtime::new().unwrap();
-    rt.block_on(async {
-        let options = ManagerOptions {
-            port: 5038,
-            host: "example.com".to_string(),
-            username: "admin".to_string(),
-            password: "password".to_string(),
-            events: false,
-        };
-
-        let callback1 = Box::new(|event: Value| {
-            println!("Callback1 received event: {}", event);
-        });
-
-        let callback2 = Box::new(|event: Value| {
-            println!("Callback2 received event: {}", event);
-        });
-
-        let global_callback = Box::new(|event: Value| {
-            println!("Global callback received event: {}", event);
-        });
-
-        let raw_event_callback = Box::new(|event: Value| {
-            println!("Raw event callback received event: {}", event);
-        });
-
-        let response_event_callback = Box::new(|event: Value| {
-            println!("Response event callback received event: {}", event);
-        });
-
-        let mut manager = ManagerBuilder::new(options)
-            .on_event("Newchannel", callback1)
-            .on_event("Hangup", callback2)
-            .on_all_events(global_callback)
-            .on_all_raw_events(raw_event_callback)
-            .on_all_response_events(response_event_callback)
-            .build();
-
-        manager.connect_with_retries().await;
-
-        if !manager.is_authenticated() {
-            println!("Authentication failed");
-            return;
+#[tokio::main]
+async fn main() {
+    let options = ManagerOptions {
+        port: 5038,
+        host: "127.0.0.1".to_string(),
+        username: "admin".to_string(),
+        password: "password".to_string(),
+        events: true,
+    };
+    let mut manager = Manager::new(options);
+    manager.connect_and_login().await.unwrap();
+    let mut events = manager.all_events_stream();
+    tokio::spawn(async move {
+        while let Some(ev) = events.next().await {
+            println!("Evento: {:?}", ev);
         }
-
-        let action = serde_json::json!({
-            "action": "QueueStatus",
-        });
-        if let Err(err) = manager.send_action(action).await {
-            println!("Error sending action: {}", err);
-            return;
-        }
-
-        manager.read_data_with_retries().await;
-
-        manager.disconnect().await;
     });
+    let resp = manager.send_action(AmiAction::Ping { action_id: None }).await.unwrap();
+    println!("Resposta ao Ping: {:?}", resp);
+    manager.disconnect().await.unwrap();
 }
 ```
 
-### Optional Parameters
+## Instalação
 
-The `event_sender` and `event_callback` parameters in the `Manager::new` method are optional. If you do not need to handle events or use callbacks, you can pass `None` for these parameters:
-
-```rust
-let mut manager = Manager::new(Some(options), None, None);
-```
-
-## Installation
-
-Add this to your `Cargo.toml`:
+Adicione ao seu `Cargo.toml`:
 
 ```toml
 [dependencies]
-asterisk_manager = "0.1.1"
+asterisk-manager = "1.0.0"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
 ```
 
-## Based On
+## Baseado em
 
-This library is based on the [NodeJS-AsteriskManager](https://github.com/pipobscure/NodeJS-AsteriskManager) repository and the [node-asterisk](https://github.com/mscdex/node-asterisk) repository.
+Inspirado por [NodeJS-AsteriskManager](https://github.com/pipobscure/NodeJS-AsteriskManager) e [node-asterisk](https://github.com/mscdex/node-asterisk), mas com foco em Rust moderno e tipagem forte.
