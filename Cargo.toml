@@ -18,3 +18,4 @@ log = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 actix-web = "4"
+thiserror = "2.0.12"

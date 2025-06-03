@@ -1,15 +1,15 @@
 # Asterisk Manager Library (v1.0.0)
 
-Esta biblioteca fornece uma implementação moderna, fortemente tipada e baseada em streams para interação com o Asterisk Manager Interface (AMI).
+A modern, strongly-typed, async and stream-based library for interacting with the Asterisk Manager Interface (AMI).
 
 ## Features
 
-- **Mensagens AMI tipadas**: Actions, Events e Responses como enums/structs Rust.
-- **API baseada em Stream**: Consumo de eventos via tokio_stream.
-- **Operações assíncronas**: Utiliza Tokio.
-- **Reconexão automática** e **correlação ActionID/Response**.
+- **Strongly-typed AMI messages**: Actions, Events and Responses as Rust enums/structs.
+- **Stream-based API**: Consume events via `tokio_stream`.
+- **Async operations**: Built on Tokio.
+- **ActionID/Response correlation**: Each action can be tracked by its ActionID.
 
-## Exemplo de uso
+## Example
 
 ```rust,no_run
 use asterisk_manager::{Manager, ManagerOptions, AmiAction};
@@ -24,23 +24,23 @@ async fn main() {
         password: "password".to_string(),
         events: true,
     };
-    let mut manager = Manager::new(options);
+    let manager = Manager::new(options);
     manager.connect_and_login().await.unwrap();
-    let mut events = manager.all_events_stream();
+    let mut events = manager.all_events_stream().await;
     tokio::spawn(async move {
         while let Some(ev) = events.next().await {
-            println!("Evento: {:?}", ev);
+            println!("Event: {:?}", ev);
         }
     });
     let resp = manager.send_action(AmiAction::Ping { action_id: None }).await.unwrap();
-    println!("Resposta ao Ping: {:?}", resp);
+    println!("Ping response: {:?}", resp);
     manager.disconnect().await.unwrap();
 }
 ```
 
-## Instalação
+## Installation
 
-Adicione ao seu `Cargo.toml`:
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -53,6 +53,7 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 ```
 
-## Baseado em
+## Notes
 
-Inspirado por [NodeJS-AsteriskManager](https://github.com/pipobscure/NodeJS-AsteriskManager) e [node-asterisk](https://github.com/mscdex/node-asterisk), mas com foco em Rust moderno e tipagem forte.
+- Automatic reconnection is **not** handled by the library. If you need reconnection, implement it in your application logic (see the example in `examples/actix_web_example.rs`).
+- Inspired by [NodeJS-AsteriskManager](https://github.com/pipobscure/NodeJS-AsteriskManager) and [node-asterisk](https://github.com/mscdex/node-asterisk), but focused on modern Rust and strong typing.
