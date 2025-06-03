@@ -1,16 +1,20 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use asterisk_manager::{AmiAction, AmiEvent, AmiResponse, Manager, ManagerOptions};
+use asterisk_manager::{AmiAction, AmiError, AmiEvent, AmiResponse, Manager, ManagerOptions};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio_stream::StreamExt;
 
+const RETRY_LIMIT: usize = 100;
+const MAX_EVENT_BUFFER_SIZE: usize = 1000;
+
 #[derive(Clone)]
 struct AppState {
     manager: Arc<Mutex<Manager>>,
     events: Arc<Mutex<Vec<AmiEvent>>>,
-    manager_options: Arc<ManagerOptions>,
+    manager_options: ManagerOptions,
 }
 
 #[derive(Deserialize)]
@@ -33,15 +37,43 @@ struct CallsResponse {
 
 async fn get_events(data: web::Data<AppState>) -> impl Responder {
     let events = data.events.lock().await;
-    println!("[HTTP] GET /events - returning {} events", events.len());
+    info!("[HTTP] GET /events - returning {} events", events.len());
     // Detailed log of events for debugging
     for (i, ev) in events.iter().enumerate() {
-        println!("[HTTP] Event #{}: {:?}", i, ev);
+        info!("[HTTP] Event #{}: {:?}", i, ev);
     }
     HttpResponse::Ok().json(&*events)
 }
 
-async fn ensure_manager_connected(app_state: &AppState) -> Result<(), String> {
+async fn attempt_reconnection(manager: &Manager) -> Result<(), AmiError> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match manager.connect_and_login().await {
+            Ok(_) => {
+                info!("[MAIN] AMI login successful on attempt {}", attempts);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("[MAIN] AMI login failed: {} (attempt {})", e, attempts);
+                match &e {
+                    AmiError::Timeout | AmiError::ConnectionClosed | AmiError::Io(_)
+                        if attempts < RETRY_LIMIT =>
+                    {
+                        info!("[MAIN] Retrying AMI connection in 2 seconds...");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    _ => {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> {
     let mut attempts = 0;
     loop {
         let mut manager_guard = app_state.manager.lock().await;
@@ -53,7 +85,7 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), String> {
             "[RECONNECT] Trying to reconnect to AMI... attempt {}",
             attempts
         );
-        let new_manager = Manager::new((*app_state.manager_options).clone());
+        let new_manager = Manager::new(app_state.manager_options.clone());
         match new_manager.connect_and_login().await {
             Ok(_) => {
                 *manager_guard = new_manager;
@@ -62,19 +94,18 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), String> {
             }
             Err(e) => {
                 println!("[RECONNECT] Failed to reconnect: {}", e);
-                let err_str = format!("{}", e);
-                if (err_str.contains("Timeout")
-                    || err_str.contains("Operation timed out")
-                    || err_str.contains("Connection refused")
-                    || err_str.contains("IO error"))
-                    && attempts < 100
-                {
-                    println!("[RECONNECT] Retrying in 2 seconds...");
-                    drop(manager_guard); // Release the lock before sleeping
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                } else {
-                    return Err(format!("Failed to reconnect: {}", e));
+                match &e {
+                    AmiError::Timeout | AmiError::ConnectionClosed | AmiError::Io(_)
+                        if attempts < RETRY_LIMIT =>
+                    {
+                        println!("[RECONNECT] Retrying in 2 seconds...");
+                        drop(manager_guard); // Release the lock before sleeping
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    _ => {
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -86,7 +117,7 @@ async fn post_action(data: web::Data<AppState>, req: web::Json<ActionRequest>) -
         return HttpResponse::InternalServerError().json(ActionResponse {
             result: "error".into(),
             response: None,
-            error: Some(e),
+            error: Some(e.to_string()),
         });
     }
     let manager = data.manager.lock().await;
@@ -130,29 +161,48 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
 
     // Wait up to 2 seconds for CoreShowChannel events
     let mut calls = Vec::new();
-    let start = std::time::Instant::now();
-    loop {
-        // Wait a short interval to ensure events have arrived
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let events = data.events.lock().await;
-        for ev in events.iter() {
-            match ev {
-                AmiEvent::UnknownEvent { fields, .. } => {
-                    if let Some(event_type) = fields.get("Event") {
-                        if event_type == "CoreShowChannel" {
-                            calls.push(serde_json::to_value(fields).unwrap_or_default());
+    let mut last_events_len = 0;
+    if let Ok(_) = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut no_new_events_count = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let events = data.events.lock().await;
+            let new_events = events.len() - last_events_len;
+            if new_events == 0 {
+                no_new_events_count += 1;
+                if no_new_events_count >= 5 {
+                    // If no new events arrive in 5 iterations (~500ms), break the loop
+                    break;
+                }
+            } else {
+                no_new_events_count = 0;
+            }
+            // Only process new events since the last iteration
+            for ev in events.iter().skip(last_events_len) {
+                match ev {
+                    AmiEvent::UnknownEvent { fields, .. } => {
+                        if let Some(event_type) = fields.get("Event") {
+                            if event_type == "CoreShowChannel" {
+                                match serde_json::to_value(fields) {
+                                    Ok(value) => calls.push(value),
+                                    Err(e) => {
+                                        println!("[ERROR] Failed to serialize fields: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            last_events_len = events.len();
         }
-        // Exit the loop after 2 seconds
-        if start.elapsed() > Duration::from_secs(2) {
-            break;
-        }
+    })
+    .await
+    {
+        // Timeout occurred, exit the loop
     }
-
     HttpResponse::Ok().json(CallsResponse { calls })
 }
 
@@ -160,42 +210,24 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
 async fn main() -> std::io::Result<()> {
     // Configure AMI as needed
     let options = ManagerOptions {
-        port: 5038,
-        host: "example.voip.net".to_string(),
-        username: "admin".to_string(),
-        password: "test".to_string(),
+        port: std::env::var("AMI_PORT")
+            .unwrap_or_else(|_| "5038".to_string())
+            .parse()
+            .unwrap_or(5038),
+        host: std::env::var("AMI_HOST").unwrap_or_else(|_| "example.voip.net".to_string()),
+        username: std::env::var("AMI_USERNAME").unwrap_or_else(|_| "admin".to_string()),
+        password: std::env::var("AMI_PASSWORD").unwrap_or_else(|_| "test".to_string()),
         events: true,
     };
 
     let manager = Manager::new(options.clone());
 
-    // Try to connect and login, with reconnection attempts on Timeout, Operation timed out, Connection refused or IO error
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        match manager.connect_and_login().await {
-            Ok(_) => {
-                println!("[MAIN] AMI login successful on attempt {}", attempts);
-                break;
-            }
-            Err(e) => {
-                eprintln!("[MAIN] AMI login failed: {} (attempt {})", e, attempts);
-                let err_str = format!("{}", e);
-                if (err_str.contains("Timeout")
-                    || err_str.contains("Operation timed out")
-                    || err_str.contains("Connection refused")
-                    || err_str.contains("IO error"))
-                    && attempts < 100
-                {
-                    println!("[MAIN] Retrying AMI connection in 2 seconds...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                } else {
-                    panic!("AMI login failed: {}", e);
-                }
-            }
-        }
+    // Try to connect and login, with reconnection attempts
+    if let Err(e) = attempt_reconnection(&manager).await {
+        eprintln!("[MAIN] AMI login failed after multiple attempts: {}", e);
+        std::process::exit(1);
     }
+    println!("[MAIN] AMI login successful.");
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut event_stream = manager.all_events_stream().await;
@@ -203,7 +235,7 @@ async fn main() -> std::io::Result<()> {
     let app_state = AppState {
         manager: Arc::new(Mutex::new(manager)),
         events,
-        manager_options: Arc::new(options),
+        manager_options: options.clone(),
     };
 
     // Task to collect events in memory and trigger reconnection if needed
@@ -249,12 +281,12 @@ async fn main() -> std::io::Result<()> {
                     let mut evs = app_state_clone.events.lock().await;
                     evs.push(event);
                     let len = evs.len();
-                    if len > 1000 {
+                    if len > MAX_EVENT_BUFFER_SIZE {
                         println!(
                             "[AMI EVENT] Event limit reached, discarding old ones ({} removed)",
-                            len - 1000
+                            len - MAX_EVENT_BUFFER_SIZE
                         );
-                        evs.drain(0..len - 1000);
+                        evs.drain(0..len - MAX_EVENT_BUFFER_SIZE);
                     }
                 }
                 Err(e) => {
