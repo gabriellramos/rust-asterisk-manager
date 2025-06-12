@@ -1,229 +1,253 @@
 //! # Asterisk Manager Library
 //!
-//! This library provides an implementation to manage connections and authentication with an Asterisk Call Manager (AMI) server.
+//! A modern, strongly-typed, stream-based library for integration with the Asterisk Manager Interface (AMI).
 //!
-//! It offers a robust and efficient way to interact with the AMI server, handling connection retries, authentication, and event processing seamlessly. The library is built using Tokio for asynchronous operations, ensuring high performance and scalability. Additionally, it processes and formats data into JSON objects for easy manipulation and integration.
-//!
-//! ## Features
-//!
-//! - **Reconnection Logic**: Automatically handles reconnections to the AMI server in case of connection drops.
-//! - **Event Handling**: Processes various AMI events and provides a mechanism to handle them.
-//! - **Asynchronous Operations**: Utilizes Tokio for non-blocking, asynchronous operations.
-//! - **Participant Management**: Manages call participants and their states efficiently.
-//! - **JSON Data Handling**: Formats and processes data into JSON objects for easy manipulation.
-//! - **Event Callbacks**: Allows registration of callbacks for specific events, all events, raw events, and response events.
+//! - **Typed AMI messages**: Actions, Events, and Responses as Rust enums/structs.
+//! - **Stream-based API**: Consume events via `tokio_stream`.
+//! - **Asynchronous operations**: Fully based on Tokio.
 //!
 //! ## Usage Example
 //!
 //! ```rust,no_run
-//! use asterisk_manager::{ManagerBuilder, ManagerOptions};
-//! use tokio::runtime::Runtime;
-//! use serde_json::Value;
+//! use asterisk_manager::{Manager, ManagerOptions, AmiAction};
+//! use tokio_stream::StreamExt;
 //!
-//! fn main() {
-//!     let rt = Runtime::new().unwrap();
-//!     rt.block_on(async {
-//!         let options = ManagerOptions {
-//!             port: 5038,
-//!             host: "example.com".to_string(),
-//!             username: "admin".to_string(),
-//!             password: "password".to_string(),
-//!             events: false,
-//!         };
+//! #[tokio::main]
+//! async fn main() {
+//!     let options = ManagerOptions {
+//!         port: 5038,
+//!         host: "127.0.0.1".to_string(),
+//!         username: "admin".to_string(),
+//!         password: "password".to_string(),
+//!         events: true,
+//!     };
+//!     let manager = Manager::new(options);
+//!     manager.connect_and_login().await.unwrap();
 //!
-//!         let callback1 = Box::new(|event: Value| {
-//!             println!("Callback1 received event: {}", event);
-//!         });
-//!
-//!         let callback2 = Box::new(|event: Value| {
-//!             println!("Callback2 received event: {}", event);
-//!         });
-//!
-//!         let global_callback = Box::new(|event: Value| {
-//!             println!("Global callback received event: {}", event);
-//!         });
-//!
-//!         let raw_event_callback = Box::new(|event: Value| {
-//!             println!("Raw event callback received event: {}", event);
-//!         });
-//!
-//!         let response_event_callback = Box::new(|event: Value| {
-//!             println!("Response event callback received event: {}", event);
-//!         });
-//!
-//!         let mut manager = ManagerBuilder::new(options)
-//!             .on_event("Newchannel", callback1)
-//!             .on_event("Hangup", callback2)
-//!             .on_all_events(global_callback)
-//!             .on_all_raw_events(raw_event_callback)
-//!             .on_all_response_events(response_event_callback)
-//!             .build();
-//!
-//!         manager.connect_with_retries().await;
-//!
-//!         if !manager.is_authenticated() {
-//!             println!("Authentication failed");
-//!             return;
+//!     let mut events = manager.all_events_stream().await;
+//!     tokio::spawn(async move {
+//!         while let Some(Ok(ev)) = events.next().await {
+//!             println!("Event: {:?}", ev);
 //!         }
-//!
-//!         let action = serde_json::json!({
-//!             "action": "QueueStatus",
-//!         });
-//!         if let Err(err) = manager.send_action(action).await {
-//!             println!("Error sending action: {}", err);
-//!             return;
-//!         }
-//!
-//!         manager.read_data_with_retries().await;
-//!
-//!         manager.disconnect().await;
 //!     });
+//!
+//!     let resp = manager.send_action(AmiAction::Ping { action_id: None }).await.unwrap();
+//!     println!("Ping response: {:?}", resp);
+//!     manager.disconnect().await.unwrap();
 //! }
 //! ```
 //!
-//! ## Participant Structure
+//! ## Features
 //!
-//! The `Participant` structure represents a participant in a call.
+//! - Login/logout, sending actions, and receiving AMI events.
+//! - Support for common events (`Newchannel`, `Hangup`, `PeerStatus`) and fallback for unknown events.
+//! - Detailed error handling via the `AmiError` enum.
 //!
-//! ```rust
-//! #[derive(Debug)]
-//! pub struct Participant {
-//!     name: String,
-//!     number: String,
-//!     with: Option<String>,
-//! }
-//! ```
+//! ## Requirements
 //!
-//! ## Manager Structure
+//! - Rust 1.70+
+//! - Tokio (async runtime)
 //!
-//! The `Manager` structure handles connections and options for the AMI server.
+//! ## License
 //!
-//! ```rust
-//! use asterisk_manager::ManagerOptions;
-//! use tokio::net::TcpStream;
-//! use std::collections::HashMap;
-//! use tokio::sync::mpsc;
-//! use asterisk_manager::Participant;
-//! use std::sync::{Arc, Mutex};
-//!
-//! pub struct Manager {
-//!     options: ManagerOptions,
-//!     connection: Option<TcpStream>,
-//!     authenticated: bool,
-//!     emitter: Arc<Mutex<Vec<String>>>,
-//!     event_sender: Option<mpsc::Sender<String>>,
-//!     participants: HashMap<String, Participant>,
-//!     event_callbacks: HashMap<String, Box<dyn Fn(serde_json::Value) + Send + Sync>>,
-//!     global_callback: Option<Box<dyn Fn(serde_json::Value) + Send + Sync>>,
-//!     raw_event_callback: Option<Box<dyn Fn(serde_json::Value) + Send + Sync>>,
-//!     response_event_callback: Option<Box<dyn Fn(serde_json::Value) + Send + Sync>>,
-//! }
-//! ```
-//!
-//! ## Main Methods
-//!
-//! ### `Manager::new`
-//! Creates a new instance of the Manager. The `event_sender` and `event_callback` parameters are optional.
-//!
-//! ### `Manager::connect`
-//! Connects to the AMI server.
-//!
-//! ### `Manager::connect_with_retries`
-//! Connects to the AMI server with reconnection logic.
-//!
-//! ### `Manager::authenticate`
-//! Authenticates with the AMI server.
-//!
-//! ### `Manager::send_action`
-//! Sends an action to the AMI server.
-//!
-//! ### `Manager::read_data`
-//! Reads data from the AMI server.
-//!
-//! ### `Manager::read_data_with_retries`
-//! Reads data from the AMI server with reconnection logic.
-//!
-//! ### `Manager::on_event`
-//! Processes an event received from the AMI server.
-//!
-//! ### `Manager::parse_event`
-//! Parses an event received from the AMI server.
-//!
-//! ### `Manager::disconnect`
-//! Disconnects from the AMI server.
-//!
-//! ### `Manager::is_authenticated`
-//! Returns whether the manager is authenticated.
-//!
-//! ## ManagerBuilder Structure
-//!
-//! The `ManagerBuilder` structure helps in building a `Manager` instance with various event callbacks.
-//!
-//! ### `ManagerBuilder::new`
-//! Creates a new instance of the `ManagerBuilder`.
-//!
-//! ### `ManagerBuilder::on_event`
-//! Registers a callback for a specific event.
-//!
-//! ### `ManagerBuilder::on_all_events`
-//! Registers a callback for all events.
-//!
-//! ### `ManagerBuilder::on_all_raw_events`
-//! Registers a callback for all raw events.
-//!
-//! ### `ManagerBuilder::on_all_response_events`
-//! Registers a callback for all response events.
-//!
-//! ### `ManagerBuilder::build`
-//! Builds and returns a `Manager` instance.
+//! MIT
 
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::Stream;
+use uuid::Uuid;
 
-/// Structure that contains the Manager configuration options.
-/// Represents the configuration options for the manager.
-///
-/// # Fields
-///
-/// * `port` - The port to connect to Asterisk AMI.
-/// * `host` - The host to connect to Asterisk AMI.
-/// * `username` - The username to authenticate with.
-/// * `password` - The password to authenticate with.
-/// * `events` - Indicates whether events should be enabled.
-///
-/// # Example
-///
-/// ```rust
-/// use asterisk_manager::ManagerOptions;
-///
-/// let options = ManagerOptions {
-///     port: 5038,
-///     host: "example.com".to_string(),
-///     username: "admin".to_string(),
-///     password: "password".to_string(),
-///     events: false,
-/// };
-/// ```
-///
-/// # Example (JSON)
-///
-/// ```json
-/// {
-///     "port": 5038,
-///     "host": "example.com",
-///     "username": "admin",
-///     "password": "password",
-///     "events": false
-/// }
-/// ```
-///
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmiResponse {
+    #[serde(rename = "Response")]
+    pub response: String,
+    #[serde(rename = "ActionID")]
+    pub action_id: Option<String>,
+    #[serde(rename = "Message")]
+    pub message: Option<String>,
+    #[serde(flatten)]
+    pub fields: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "Action", rename_all = "PascalCase")]
+pub enum AmiAction {
+    Login {
+        username: String,
+        secret: String,
+        #[serde(rename = "Events")]
+        events: Option<String>,
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+    Logoff {
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+    Ping {
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+    Command {
+        command: String,
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+    Custom {
+        action: String,
+        #[serde(flatten)]
+        params: HashMap<String, String>,
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewchannelEventData {
+    #[serde(rename = "Channel")]
+    pub channel: String,
+    #[serde(rename = "Uniqueid")]
+    pub uniqueid: String,
+    #[serde(rename = "ChannelState")]
+    pub channel_state: Option<String>,
+    #[serde(rename = "ChannelStateDesc")]
+    pub channel_state_desc: Option<String>,
+    #[serde(rename = "CallerIDNum")]
+    pub caller_id_num: Option<String>,
+    #[serde(rename = "CallerIDName")]
+    pub caller_id_name: Option<String>,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HangupEventData {
+    #[serde(rename = "Channel")]
+    pub channel: String,
+    #[serde(rename = "Uniqueid")]
+    pub uniqueid: String,
+    #[serde(rename = "Cause")]
+    pub cause: Option<String>,
+    #[serde(rename = "Cause-txt")]
+    pub cause_txt: Option<String>,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerStatusEventData {
+    #[serde(rename = "Peer")]
+    pub peer: String,
+    #[serde(rename = "PeerStatus")]
+    pub peer_status: String,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum AmiEvent {
+    Newchannel(NewchannelEventData),
+    Hangup(HangupEventData),
+    PeerStatus(PeerStatusEventData),
+    UnknownEvent {
+        event_type: String,
+        fields: HashMap<String, String>,
+    },
+    InternalConnectionLost {
+        error: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for AmiEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let map_obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("AmiEvent: Expected a JSON object/map"))?;
+
+        if let Some(event_type_val) = map_obj.get("Event") {
+            let event_type_str = event_type_val.as_str().ok_or_else(|| {
+                serde::de::Error::custom("AmiEvent: 'Event' field is not a string")
+            })?;
+
+            match event_type_str {
+                "Newchannel" => Ok(AmiEvent::Newchannel(
+                    NewchannelEventData::deserialize(value.clone())
+                        .map_err(serde::de::Error::custom)?,
+                )),
+                "Hangup" => Ok(AmiEvent::Hangup(
+                    HangupEventData::deserialize(value.clone())
+                        .map_err(serde::de::Error::custom)?,
+                )),
+                "PeerStatus" => Ok(AmiEvent::PeerStatus(
+                    PeerStatusEventData::deserialize(value.clone())
+                        .map_err(serde::de::Error::custom)?,
+                )),
+                _ => {
+                    let fields: HashMap<String, String> = map_obj
+                        .iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect();
+                    Ok(AmiEvent::UnknownEvent {
+                        event_type: event_type_str.to_string(),
+                        fields,
+                    })
+                }
+            }
+        } else {
+            let fields: HashMap<String, String> = map_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            Ok(AmiEvent::UnknownEvent {
+                event_type: "UnknownOrMalformed".to_string(),
+                fields,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AmiError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    #[error("Serialize error: {0}")]
+    SerializeError(String),
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+    #[error("Action failed: {response:?}")]
+    ActionFailed { response: AmiResponse },
+    #[error("Connection closed")]
+    ConnectionClosed,
+    #[error("Operation timed out")]
+    Timeout,
+    #[error("Login required")]
+    LoginRequired,
+    #[error("Internal channel error: {0}")]
+    ChannelError(String),
+    #[error("Event stream lagged: {0}")]
+    EventStreamLagged(#[from] tokio::sync::broadcast::error::RecvError),
+    #[error("Not connected to AMI server")]
+    NotConnected,
+    #[error("Other error: {0}")]
+    Other(String),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ManagerOptions {
     pub port: u16,
     pub host: String,
@@ -232,630 +256,557 @@ pub struct ManagerOptions {
     pub events: bool,
 }
 
-/// Structure that represents the Manager.
-/// Represents a manager that handles connections and options.
-///
-/// # Fields
-///
-/// * `options` - Configuration options for the manager.
-/// * `connection` - An optional TCP stream representing the connection.
-/// * `authenticated` - Indicates whether the manager is authenticated. This field is currently unused.
-/// * `emitter` - A thread-safe vector of strings used for emitting events or messages.
-pub struct Manager {
+struct InnerManager {
     options: ManagerOptions,
     connection: Option<TcpStream>,
     authenticated: bool,
-    emitter: Arc<Mutex<Vec<String>>>,
-    event_sender: Option<mpsc::Sender<String>>,
-    participants: HashMap<String, Participant>,
-    event_callbacks: HashMap<String, Box<dyn Fn(Value) + Send + Sync>>,
-    global_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    raw_event_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    response_event_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
+    event_broadcaster: broadcast::Sender<AmiEvent>,
+    pending_responses: HashMap<String, oneshot::Sender<Result<AmiResponse, AmiError>>>,
 }
 
-pub struct ManagerBuilder {
-    options: ManagerOptions,
-    #[allow(dead_code)]
-    event_senders: HashMap<String, mpsc::Sender<String>>,
-    event_callbacks: HashMap<String, Box<dyn Fn(Value) + Send + Sync>>,
-    global_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    raw_event_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    response_event_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-}
-
-/// A builder for creating a `Manager` instance with various event callbacks.
-///
-/// # Example
-///
-/// ```
-/// use asterisk_manager::ManagerBuilder;
-/// use asterisk_manager::ManagerOptions;
-///
-/// let options = ManagerOptions {
-///     port: 5038,
-///     host: "example.com".to_string(),
-///     username: "admin".to_string(),
-///     password: "password".to_string(),
-///     events: false,
-/// };
-///
-/// let manager = ManagerBuilder::new(options)
-///     .on_event("event_name", Box::new(|value| {
-///         // handle event
-///     }))
-///     .on_all_events(Box::new(|value| {
-///         // handle all events
-///     }))
-///     .on_all_raw_events(Box::new(|value| {
-///         // handle all raw events
-///     }))
-///     .on_all_response_events(Box::new(|value| {
-///         // handle all response events
-///     }))
-///     .build();
-/// ```
-///
-/// # Methods
-///
-/// - `new(options: ManagerOptions) -> Self`: Creates a new `ManagerBuilder` with the specified options.
-/// - `on_event(mut self, event: &str, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self`: Registers a callback for a specific event.
-/// - `on_all_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self`: Registers a callback for all events.
-/// - `on_all_raw_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self`: Registers a callback for all raw events.
-/// - `on_all_response_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self`: Registers a callback for all response events.
-/// - `build(self) -> Manager`: Consumes the builder and returns a `Manager` instance.
-impl ManagerBuilder {
-    /// Creates a new instance of the `ManagerBuilder`.
-    /// Initializes the builder with the specified options.
-    pub fn new(options: ManagerOptions) -> Self {
-        ManagerBuilder {
-            options,
-            event_senders: HashMap::new(),
-            event_callbacks: HashMap::new(),
-            global_callback: None,
-            raw_event_callback: None,
-            response_event_callback: None,
-        }
-    }
-
-    /// Registers a callback for a specific event.
-    pub fn on_event(mut self, event: &str, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
-        self.event_callbacks.insert(event.to_string(), callback);
-        self
-    }
-
-    /// Registers a callback for all events.
-    pub fn on_all_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
-        self.global_callback = Some(callback);
-        self
-    }
-
-    /// Registers a callback for all raw events.
-    pub fn on_all_raw_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
-        self.raw_event_callback = Some(callback);
-        self
-    }
-
-    /// Registers a callback for all response events by actions sended to AMI Asterisk.
-    pub fn on_all_response_events(mut self, callback: Box<dyn Fn(Value) + Send + Sync>) -> Self {
-        self.response_event_callback = Some(callback);
-        self
-    }
-
-    /// Consumes the builder and returns a `Manager` instance.
-    pub fn build(self) -> Manager {
-        Manager {
-            options: self.options,
-            connection: None,
-            authenticated: false,
-            emitter: Arc::new(Mutex::new(vec![])),
-            event_sender: None,
-            participants: HashMap::new(),
-            event_callbacks: self.event_callbacks,
-            global_callback: self.global_callback,
-            raw_event_callback: self.raw_event_callback,
-            response_event_callback: self.response_event_callback,
-        }
-    }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct Participant {
-    name: String,
-    number: String,
-    with: Option<String>,
+#[derive(Clone)]
+pub struct Manager {
+    inner: Arc<Mutex<InnerManager>>,
 }
 
 impl Manager {
-    /// Creates a new instance of the Manager.
-    pub fn new(
-        options: ManagerOptions,
-        event_sender: Option<mpsc::Sender<String>>,
-        _event_callback: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    ) -> Self {
-        Manager {
-            options,
-            connection: None,
-            authenticated: false,
-            emitter: Arc::new(Mutex::new(vec![])),
-            event_sender,
-            participants: HashMap::new(),
-            event_callbacks: HashMap::new(),
-            global_callback: None,
-            raw_event_callback: None,
-            response_event_callback: None,
+    pub fn new(options: ManagerOptions) -> Self {
+        let (event_tx, _) = broadcast::channel(1024);
+        Self {
+            inner: Arc::new(Mutex::new(InnerManager {
+                options,
+                connection: None,
+                authenticated: false,
+                event_broadcaster: event_tx,
+                pending_responses: HashMap::new(),
+            })),
         }
     }
 
-    /// Connects to the AMI server.
-    pub async fn connect(&mut self) -> Result<(), String> {
-        log::debug!("Connecting to {}:{}", self.options.host, self.options.port);
-        let connection = timeout(
+    pub async fn connect_and_login(&self) -> Result<(), AmiError> {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.connect().await?;
+            inner.authenticate().await?;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _ = this.read_loop().await;
+        });
+        Ok(())
+    }
+
+    pub async fn send_action(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
+        let action_id = get_or_set_action_id(&mut action);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut inner = self.inner.lock().await;
+            if !inner.authenticated && !matches!(action, AmiAction::Login { .. }) {
+                return Err(AmiError::LoginRequired);
+            }
+            if inner.connection.is_none() {
+                return Err(AmiError::NotConnected);
+            }
+
+            inner.pending_responses.insert(action_id.clone(), tx);
+            let action_str = serialize_ami_action(&action)?;
+            let conn = inner.connection.as_mut().ok_or(AmiError::NotConnected)?;
+
+            conn.write_all(action_str.as_bytes())
+                .await
+                .map_err(AmiError::Io)?;
+            conn.flush().await.map_err(AmiError::Io)?;
+        }
+        match timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(Ok(resp))) => {
+                if resp.response.eq_ignore_ascii_case("Error") {
+                    Err(AmiError::ActionFailed { response: resp })
+                } else {
+                    Ok(resp)
+                }
+            }
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(AmiError::ChannelError("Responder dropped".to_string())),
+            Err(_) => Err(AmiError::Timeout),
+        }
+    }
+
+    async fn read_loop(&self) -> Result<(), AmiError> {
+        loop {
+            let processing_result: Result<(), AmiError> = async {
+                loop {
+                    let raw_data: String;
+                    {
+                        let mut inner = self.inner.lock().await;
+                        raw_data = inner.read_ami_message_raw().await?;
+                    }
+                    let parsed_messages = parse_ami_protocol_message(&raw_data)?;
+                    {
+                        let mut inner = self.inner.lock().await;
+                        for value_msg in parsed_messages {
+                            if value_msg.get("Event").is_some() {
+                                match serde_json::from_value::<AmiEvent>(value_msg.clone())
+                                    .map_err(|e| AmiError::ParseError(format!("AmiEvent: {}", e)))
+                                {
+                                    Ok(event) => {
+                                        let _ = inner.event_broadcaster.send(event);
+                                    }
+                                    Err(_) => {
+                                        let mut fallback = HashMap::new();
+                                        if let Some(obj) = value_msg.as_object() {
+                                            for (k, v) in obj {
+                                                if let Some(s) = v.as_str() {
+                                                    fallback.insert(k.clone(), s.to_string());
+                                                }
+                                            }
+                                        }
+                                        let _ =
+                                            inner.event_broadcaster.send(AmiEvent::UnknownEvent {
+                                                event_type: "ParseError".to_string(),
+                                                fields: fallback,
+                                            });
+                                    }
+                                }
+                            } else if value_msg.get("Response").is_some() {
+                                match serde_json::from_value::<AmiResponse>(value_msg.clone())
+                                    .map_err(|e| {
+                                        AmiError::ParseError(format!("AmiResponse: {}", e))
+                                    }) {
+                                    Ok(resp) => {
+                                        if let Some(action_id) = &resp.action_id {
+                                            if let Some(responder) =
+                                                inner.pending_responses.remove(action_id)
+                                            {
+                                                let _ = responder.send(Ok(resp));
+                                            }
+                                        }
+                                    }
+                                    Err(parse_err) => {
+                                        if let Some(action_id) =
+                                            value_msg.get("ActionID").and_then(|v| v.as_str())
+                                        {
+                                            if let Some(responder) =
+                                                inner.pending_responses.remove(action_id)
+                                            {
+                                                let _ = responder.send(Err(parse_err));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .await;
+
+            match processing_result {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    {
+                        let mut inner = self.inner.lock().await;
+                        inner.authenticated = false;
+                        inner.connection = None;
+                        for (_, responder) in inner.pending_responses.drain() {
+                            let _ = responder.send(Err(AmiError::ConnectionClosed));
+                        }
+                        let _ = inner
+                            .event_broadcaster
+                            .send(AmiEvent::InternalConnectionLost {
+                                error: format!("{}", err),
+                            });
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    pub async fn disconnect(&self) -> Result<(), AmiError> {
+        let mut inner = self.inner.lock().await;
+        if let Some(mut connection) = inner.connection.take() {
+            let logoff_action = AmiAction::Logoff {
+                action_id: Some("rust-ami-logoff".to_string()),
+            };
+            let action_str = serialize_ami_action(&logoff_action)?;
+            let _ = connection.write_all(action_str.as_bytes()).await;
+            let _ = connection.shutdown().await;
+        }
+        inner.authenticated = false;
+        Ok(())
+    }
+
+    pub async fn is_authenticated(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.authenticated
+    }
+
+    pub async fn all_events_stream(
+        &self,
+    ) -> impl Stream<Item = Result<AmiEvent, BroadcastStreamRecvError>> + Send + Unpin {
+        let inner = self.inner.lock().await;
+        BroadcastStream::new(inner.event_broadcaster.subscribe())
+    }
+}
+
+impl InnerManager {
+    async fn connect(&mut self) -> Result<(), AmiError> {
+        let stream = timeout(
             Duration::from_secs(10),
             TcpStream::connect((self.options.host.as_str(), self.options.port)),
         )
         .await
-        .map_err(|_| "Connection timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-
-        self.connection = Some(connection);
-        if let Some(sender) = &self.event_sender {
-            sender.send("serverconnect".to_string()).await.unwrap();
+        .map_err(|_| AmiError::Timeout)?
+        .map_err(AmiError::Io)?;
+        self.connection = Some(stream);
+        let mut temp_buf = [0; 1024];
+        if let Some(conn) = self.connection.as_mut() {
+            let _ = conn.read(&mut temp_buf).await;
         }
-        self.authenticate().await
-    }
-
-    /// Connects to the AMI server with reconnection logic.
-    pub async fn connect_with_retries(&mut self) {
-        let mut attempts = 0;
-        loop {
-            match self.connect().await {
-                Ok(_) => {
-                    log::info!("Successfully connected to AMI server");
-                    break;
-                }
-                Err(err) => {
-                    log::error!("Failed to connect: {}", err);
-                    attempts += 1;
-                    let wait_time = if attempts > 10 {
-                        Duration::from_secs(60)
-                    } else {
-                        Duration::from_secs(5)
-                    };
-                    log::info!("Reconnecting in {:?}", wait_time);
-                    tokio::time::sleep(wait_time).await;
-                }
-            }
-        }
-    }
-
-    /// Authenticates with the AMI server.
-    async fn authenticate(&mut self) -> Result<(), String> {
-        log::debug!("Authenticating with username: {}", self.options.username);
-        let login_action = serde_json::json!({
-            "Action": "Login",
-            "event": if self.options.events { "on" } else { "off" },
-            "secret": self.options.password,
-            "username": self.options.username
-        });
-
-        self.send_action(login_action).await?;
-
-        let response = self.read_data().await?;
-
-        if response.contains("Response: Success") {
-            self.authenticated = true;
-            Ok(())
-        } else {
-            Err("Authentication failed".to_string())
-        }
-    }
-
-    /// Sends an action to the AMI server.
-    pub async fn send_action(&mut self, action: serde_json::Value) -> Result<(), String> {
-        let mut action_str = String::new();
-        for (key, value) in action.as_object().unwrap().iter() {
-            action_str.push_str(&format!("{}: {}\r\n", key, value.as_str().unwrap_or("")));
-        }
-        action_str.push_str("\r\n");
-
-        let connection = self
-            .connection
-            .as_mut()
-            .ok_or("No connection established")?;
-        connection
-            .write_all(action_str.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-
         Ok(())
     }
 
-    /// Reads data from the AMI server.
-    pub async fn read_data(&mut self) -> Result<String, String> {
+    async fn authenticate(&mut self) -> Result<(), AmiError> {
+        let login_action = AmiAction::Login {
+            username: self.options.username.clone(),
+            secret: self.options.password.clone(),
+            events: Some(if self.options.events { "on" } else { "off" }.to_string()),
+            action_id: Some("rust-ami-login".to_string()),
+        };
+        let action_str = serialize_ami_action(&login_action)?;
+        let conn = self.connection.as_mut().ok_or(AmiError::NotConnected)?;
+        conn.write_all(action_str.as_bytes())
+            .await
+            .map_err(AmiError::Io)?;
+        let response_data = self.read_ami_message_raw().await?;
+        let parsed = parse_ami_protocol_message(&response_data)?;
+        for value_msg in parsed {
+            if let Ok(resp) = serde_json::from_value::<AmiResponse>(value_msg) {
+                if resp.response.eq_ignore_ascii_case("Success") {
+                    self.authenticated = true;
+                    return Ok(());
+                } else if resp.response.eq_ignore_ascii_case("Error") {
+                    return Err(AmiError::AuthenticationFailed(
+                        resp.message.unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+        Err(AmiError::AuthenticationFailed(
+            "No valid success response received for login".to_string(),
+        ))
+    }
+
+    async fn read_ami_message_raw(&mut self) -> Result<String, AmiError> {
         let mut buffer = vec![0; 8192];
         let mut complete_data = String::new();
-        let mut event_list_started = false;
-        let mut is_response_event = false;
 
-        let connection = self
-            .connection
-            .as_mut()
-            .ok_or("No connection established")?;
-
-        loop {
-            let n = match connection.read(&mut buffer).await {
-                Ok(n) if n == 0 => {
-                    return Err("Connection lost".to_string());
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    return Err(e.to_string());
-                }
-            };
-
-            let data = String::from_utf8_lossy(&buffer[..n]);
-            complete_data.push_str(&data);
-
-            if data.contains("Response:") {
-                is_response_event = true;
-            }
-
-            if data.contains("EventList: start") {
-                event_list_started = true;
-            }
-
-            if event_list_started && data.contains("EventList: Complete") {
-                break;
-            }
-
-            if !event_list_started && data.contains("\r\n\r\n") {
-                break;
-            }
-        }
-
-        if is_response_event {
-            self.on_event(complete_data.clone(), "responseEvent").await;
-        } else {
-            for event in complete_data.split("\r\n\r\n") {
-                if !event.trim().is_empty() {
-                    self.on_event(event.to_string(), "rawEvent").await;
-                }
-            }
-        }
-
-        Ok(complete_data)
-    }
-
-    /// Reads data from the AMI server with reconnection logic.
-    pub async fn read_data_with_retries(&mut self) {
-        loop {
-            match self.read_data().await {
-                Ok(_) => {}
-                Err(err) => {
-                    log::error!("Error reading data: {}", err);
-                    self.connect_with_retries().await;
-                }
-            }
-        }
-    }
-
-    /// Processes an event received from the AMI server.
-    pub async fn on_event(&mut self, event: String, event_type: &str) {
-        let json_event = self.parse_event(&event).unwrap();
-        let event_name = json_event["Event"].as_str().unwrap_or("");
-
-        if let Some(callback) = self.event_callbacks.get(event_name) {
-            callback(json_event.clone());
-        }
-
-        if let Some(global_callback) = &self.global_callback {
-            global_callback(json_event.clone());
-        }
-
-        match event_type {
-            "rawEvent" => {
-                if let Some(raw_event_callback) = &self.raw_event_callback {
-                    raw_event_callback(json_event.clone());
-                }
-            }
-            "responseEvent" => {
-                if let Some(response_event_callback) = &self.response_event_callback {
-                    response_event_callback(json_event.clone());
-                }
-            }
-            _ => {}
-        }
-
-        let get_case_insensitive = |obj: &serde_json::Value, key: &str| {
-            obj.as_object()
-                .and_then(|map| {
-                    map.iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                        .map(|(_, v)| v.clone())
-                })
-                .unwrap_or_else(|| serde_json::Value::Null)
+        let (_local_addr_str, _peer_addr_str) = {
+            let conn_ref = self.connection.as_ref().ok_or(AmiError::NotConnected)?;
+            let local_addr = conn_ref.local_addr().map_err(AmiError::Io)?;
+            let peer_addr = conn_ref.peer_addr().map_err(AmiError::Io)?;
+            (local_addr.to_string(), peer_addr.to_string())
         };
 
-        if let Some(sender) = &self.event_sender {
-            match get_case_insensitive(&json_event, "Event")
-                .as_str()
-                .unwrap_or("")
-            {
-                "Newchannel" => {
-                    let uniqueid = get_case_insensitive(&json_event, "UniqueID")
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    let participant = Participant {
-                        name: get_case_insensitive(&json_event, "calleridname")
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        number: get_case_insensitive(&json_event, "calleridnum")
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        with: None,
-                    };
-                    self.participants.insert(uniqueid, participant);
-                }
-                "Newcallerid" => {
-                    let uniqueid = get_case_insensitive(&json_event, "UniqueID")
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    if let Some(participant) = self.participants.get_mut(&uniqueid) {
-                        if participant.number.is_empty() {
-                            participant.number = get_case_insensitive(&json_event, "callerid")
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
-                        }
-                        if !get_case_insensitive(&json_event, "calleridname")
-                            .as_str()
-                            .unwrap_or("")
-                            .starts_with('<')
-                        {
-                            participant.name = get_case_insensitive(&json_event, "calleridname")
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
-                        }
-                    }
-                }
-                "Dial" => {
-                    let src_uniqueid = get_case_insensitive(&json_event, "srcuniqueid")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    let dest_uniqueid = get_case_insensitive(&json_event, "destuniqueid")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    if let Some(src_participant) = self.participants.get_mut(&src_uniqueid) {
-                        src_participant.with = Some(dest_uniqueid.clone());
-                    }
-                    if let Some(dest_participant) = self.participants.get_mut(&dest_uniqueid) {
-                        dest_participant.with = Some(src_uniqueid.clone());
-                    }
-                    sender.send("dialing".to_string()).await.unwrap();
-                }
-                "Link" => {
-                    let _uniqueid1 = get_case_insensitive(&json_event, "uniqueid1")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    let _uniqueid2 = get_case_insensitive(&json_event, "uniqueid2")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    sender.send("callconnected".to_string()).await.unwrap();
-                }
-                "Unlink" => {
-                    let _uniqueid1 = get_case_insensitive(&json_event, "uniqueid1")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    let _uniqueid2 = get_case_insensitive(&json_event, "uniqueid2")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    sender.send("calldisconnected".to_string()).await.unwrap();
-                }
-                "Hold" => {
-                    let _uniqueid = get_case_insensitive(&json_event, "uniqueid")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    sender.send("hold".to_string()).await.unwrap();
-                }
-                "Unhold" => {
-                    let _uniqueid = get_case_insensitive(&json_event, "uniqueid")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    sender.send("unhold".to_string()).await.unwrap();
-                }
-                "Hangup" => {
-                    let uniqueid = get_case_insensitive(&json_event, "uniqueid")
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    self.participants.remove(&uniqueid);
-                    sender.send("hangup".to_string()).await.unwrap();
-                }
-                "Cdr" => {
-                    let id_caller = get_case_insensitive(&json_event, "uniqueid")
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-                    let id_callee = self
-                        .participants
-                        .get(&id_caller)
-                        .and_then(|p| p.with.clone())
-                        .unwrap_or_default();
-                    let _status = get_case_insensitive(&json_event, "disposition")
-                        .as_str()
-                        .unwrap_or("")
-                        .to_lowercase();
-                    sender.send("callreport".to_string()).await.unwrap();
-                    self.participants.remove(&id_caller);
-                    self.participants.remove(&id_callee);
-                }
-                _ => {}
+        let connection = self.connection.as_mut().ok_or(AmiError::NotConnected)?;
+        loop {
+            let n = connection
+                .read(&mut buffer)
+                .await
+                .map_err(|e| AmiError::Io(e))?;
+            if n == 0 {
+                return Err(AmiError::ConnectionClosed);
+            }
+            let data_chunk_str = String::from_utf8_lossy(&buffer[..n]);
+            complete_data.push_str(&data_chunk_str);
+            if complete_data.ends_with("\r\n\r\n") {
+                break;
             }
         }
-
-        let mut emitter = self.emitter.lock().unwrap();
-        emitter.push(event.clone());
+        Ok(complete_data)
     }
+}
 
-    /// Parses an event received from the AMI server.
-    pub fn parse_event(&self, data: &str) -> Result<serde_json::Value, String> {
+fn parse_ami_protocol_message(raw_data: &str) -> Result<Vec<serde_json::Value>, AmiError> {
+    let mut messages = Vec::new();
+    for block in raw_data.trim().split("\r\n\r\n") {
+        if block.is_empty() {
+            continue;
+        }
         let mut map = serde_json::Map::new();
-        let mut events_map: std::collections::HashMap<String, Vec<serde_json::Value>> =
-            std::collections::HashMap::new();
-        let mut current_event = serde_json::Map::new();
-        let mut in_event = false;
-        let mut event_type = String::new();
-
-        for line in data.lines() {
-            if line.trim().is_empty() {
-                if in_event {
-                    events_map
-                        .entry(event_type.clone())
-                        .or_default()
-                        .push(serde_json::Value::Object(current_event.clone()));
-                    current_event.clear();
-                    in_event = false;
-                }
-                continue;
-            }
-
+        for line in block.lines() {
             if let Some((key, value)) = line.split_once(": ") {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-
-                if key == "Event" {
-                    if in_event {
-                        events_map
-                            .entry(event_type.clone())
-                            .or_default()
-                            .push(serde_json::Value::Object(current_event.clone()));
-                        current_event.clear();
-                    }
-                    event_type = value.clone();
-                    in_event = true;
-                }
-
-                if in_event {
-                    current_event.insert(key, serde_json::Value::String(value));
-                } else {
-                    map.insert(key, serde_json::Value::String(value));
-                }
+                map.insert(
+                    key.trim().to_string(),
+                    serde_json::Value::String(value.trim().to_string()),
+                );
             }
         }
-
-        if in_event {
-            events_map
-                .entry(event_type.clone())
-                .or_default()
-                .push(serde_json::Value::Object(current_event));
+        if !map.is_empty() {
+            messages.push(serde_json::Value::Object(map));
         }
+    }
+    Ok(messages)
+}
 
-        for (event, events) in events_map {
-            if events.len() == 1 {
-                map.extend(events[0].as_object().unwrap().clone());
+fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
+    let mut s = String::new();
+    match action {
+        AmiAction::Login {
+            username,
+            secret,
+            events,
+            action_id,
+        } => {
+            s.push_str("Action: Login\r\n");
+            s.push_str(&format!("Username: {}\r\n", username));
+            s.push_str(&format!("Secret: {}\r\n", secret));
+            if let Some(ev) = events {
+                s.push_str(&format!("Events: {}\r\n", ev));
+            }
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+        AmiAction::Logoff { action_id } => {
+            s.push_str("Action: Logoff\r\n");
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+        AmiAction::Ping { action_id } => {
+            s.push_str("Action: Ping\r\n");
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+        AmiAction::Command { command, action_id } => {
+            s.push_str("Action: Command\r\n");
+            s.push_str(&format!("Command: {}\r\n", command));
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+        AmiAction::Custom {
+            action: action_name,
+            params,
+            action_id,
+        } => {
+            s.push_str(&format!("Action: {}\r\n", action_name));
+            for (k, v) in params {
+                s.push_str(&format!("{}: {}\r\n", k, v));
+            }
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+    }
+    s.push_str("\r\n");
+    Ok(s)
+}
+
+fn get_or_set_action_id(action: &mut AmiAction) -> String {
+    match action {
+        AmiAction::Login { action_id, .. }
+        | AmiAction::Logoff { action_id }
+        | AmiAction::Ping { action_id }
+        | AmiAction::Command { action_id, .. }
+        | AmiAction::Custom { action_id, .. } => {
+            if let Some(id) = action_id {
+                id.clone()
             } else {
-                map.insert(event, serde_json::Value::Array(events));
+                let new_id = Uuid::new_v4().to_string();
+                *action_id = Some(new_id.clone());
+                new_id
             }
         }
-
-        Ok(serde_json::Value::Object(map))
-    }
-
-    /// Disconnects from the AMI server.
-    pub async fn disconnect(&mut self) {
-        log::debug!("Disconnecting");
-        if let Some(mut connection) = self.connection.take() {
-            let _ = connection.shutdown().await;
-        }
-        if let Some(sender) = &self.event_sender {
-            sender.send("serverdisconnect".to_string()).await.unwrap();
-        }
-    }
-
-    /// Returns whether the manager is authenticated.
-    pub fn is_authenticated(&self) -> bool {
-        self.authenticated
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_stream::StreamExt;
 
     #[test]
-    fn test_parse_event_single() {
-        let manager = Manager::new(
-            ManagerOptions {
-                port: 5038,
-                host: "example.com".to_string(),
-                username: "admin".to_string(),
-                password: "password".to_string(),
-                events: false,
-            },
-            None,
-            None,
-        );
-
-        let data = "Event: TestEvent\r\nKey: Value\r\n\r\n";
-        let parsed = manager.parse_event(data).unwrap();
-
-        assert_eq!(parsed["Key"], "Value");
+    fn test_serialize_login_action() {
+        let action = AmiAction::Login {
+            username: "user".to_string(),
+            secret: "pass".to_string(),
+            events: Some("on".to_string()),
+            action_id: Some("abc123".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Login"));
+        assert!(s.contains("Username: user"));
+        assert!(s.contains("Secret: pass"));
+        assert!(s.contains("Events: on"));
+        assert!(s.contains("ActionID: abc123"));
+        assert!(s.ends_with("\r\n\r\n"));
     }
 
     #[test]
-    fn test_parse_event_multiple() {
-        let manager = Manager::new(
-            ManagerOptions {
-                port: 5038,
-                host: "example.com".to_string(),
-                username: "admin".to_string(),
-                password: "password".to_string(),
-                events: false,
-            },
-            None,
-            None,
-        );
-
-        let data =
-            "Event: TestEvent\r\nKey1: Value1\r\n\r\nEvent: TestEvent\r\nKey2: Value2\r\n\r\n";
-        let parsed = manager.parse_event(data).unwrap();
-
-        assert_eq!(parsed["TestEvent"][0]["Key1"], "Value1");
-        assert_eq!(parsed["TestEvent"][1]["Key2"], "Value2");
+    fn test_serialize_command_action() {
+        let action = AmiAction::Command {
+            command: "sip show peers".to_string(),
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Command"));
+        assert!(s.contains("Command: sip show peers"));
     }
 
     #[test]
-    fn test_parse_event_no_event() {
-        let manager = Manager::new(
-            ManagerOptions {
-                port: 5038,
-                host: "example.com".to_string(),
-                username: "admin".to_string(),
-                password: "password".to_string(),
-                events: false,
-            },
-            None,
-            None,
-        );
+    fn test_parse_ami_protocol_message() {
+        let raw = "Response: Success\r\nActionID: 123\r\nMessage: Authentication accepted\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let obj = &parsed[0];
+        assert_eq!(obj["Response"], "Success");
+        assert_eq!(obj["ActionID"], "123");
+        assert_eq!(obj["Message"], "Authentication accepted");
+    }
 
-        let data = "Key: Value\r\n\r\n";
-        let parsed = manager.parse_event(data).unwrap();
+    #[test]
+    fn test_deserialize_ami_response() {
+        let raw = "Response: Success\r\nActionID: 123\r\nMessage: Authentication accepted\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let resp: AmiResponse = serde_json::from_value(parsed[0].clone()).unwrap();
+        assert_eq!(resp.response, "Success");
+        assert_eq!(resp.action_id.as_deref(), Some("123"));
+        assert_eq!(resp.message.as_deref(), Some("Authentication accepted"));
+    }
 
-        assert_eq!(parsed["Key"], "Value");
+    #[test]
+    fn test_deserialize_newchannel_event() {
+        let raw = "Event: Newchannel\r\nChannel: SIP/100-00000001\r\nUniqueid: 1234\r\nChannelState: 4\r\nChannelStateDesc: Ring\r\nCallerIDNum: 100\r\nCallerIDName: Alice\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::Newchannel(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+                assert_eq!(data.uniqueid, "1234");
+                assert_eq!(data.channel_state.as_deref(), Some("4"));
+                assert_eq!(data.channel_state_desc.as_deref(), Some("Ring"));
+                assert_eq!(data.caller_id_num.as_deref(), Some("100"));
+                assert_eq!(data.caller_id_name.as_deref(), Some("Alice"));
+            }
+            _ => panic!("Expected AmiEvent::Newchannel"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_hangup_event() {
+        let raw = "Event: Hangup\r\nChannel: SIP/100-00000001\r\nUniqueid: 1234\r\nCause: 16\r\nCause-txt: Normal Clearing\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::Hangup(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+                assert_eq!(data.uniqueid, "1234");
+                assert_eq!(data.cause.as_deref(), Some("16"));
+                assert_eq!(data.cause_txt.as_deref(), Some("Normal Clearing"));
+            }
+            _ => panic!("Expected AmiEvent::Hangup"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_peerstatus_event() {
+        let raw = "Event: PeerStatus\r\nPeer: SIP/100\r\nPeerStatus: Registered\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::PeerStatus(data) => {
+                assert_eq!(data.peer, "SIP/100");
+                assert_eq!(data.peer_status, "Registered");
+            }
+            _ => panic!("Expected AmiEvent::PeerStatus"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_unknown_event() {
+        let raw = "Event: FooBar\r\nSomeField: Value\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "FooBar");
+                assert_eq!(fields.get("SomeField").map(|s| s.as_str()), Some("Value"));
+            }
+            _ => panic!("Expected AmiEvent::UnknownEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_options_clone() {
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "localhost".to_string(),
+            username: "admin".to_string(),
+            password: "pwd".to_string(),
+            events: true,
+        };
+        let opts2 = opts.clone();
+        assert_eq!(opts.port, opts2.port);
+        assert_eq!(opts.host, opts2.host);
+        assert_eq!(opts.username, opts2.username);
+        assert_eq!(opts.password, opts2.password);
+        assert_eq!(opts.events, opts2.events);
+    }
+
+    #[tokio::test]
+    async fn test_manager_new_and_auth_flag() {
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "localhost".to_string(),
+            username: "admin".to_string(),
+            password: "pwd".to_string(),
+            events: false,
+        };
+        let manager = Manager::new(opts);
+        assert!(!manager.is_authenticated().await);
+    }
+
+    #[tokio::test]
+    async fn test_event_internal_connection_lost() {
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "localhost".to_string(),
+            username: "admin".to_string(),
+            password: "pwd".to_string(),
+            events: true,
+        };
+        let manager = Manager::new(opts);
+        let mut stream = manager.all_events_stream().await;
+        {
+            let inner = manager.inner.lock().await;
+            let _ = inner
+                .event_broadcaster
+                .send(AmiEvent::InternalConnectionLost {
+                    error: "simulated".to_string(),
+                });
+        }
+        let ev = stream.next().await.unwrap().unwrap();
+        match ev {
+            AmiEvent::InternalConnectionLost { error } => {
+                assert_eq!(error, "simulated");
+            }
+            _ => panic!("Expected InternalConnectionLost"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_options_default() {
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "localhost".to_string(),
+            username: "admin".to_string(),
+            password: "pwd".to_string(),
+            events: true,
+        };
+        assert_eq!(opts.events, true);
     }
 }
