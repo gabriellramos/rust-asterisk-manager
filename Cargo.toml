@@ -1,6 +1,6 @@
 [package]
 name = "asterisk-manager"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Gabriel Nascimento <gabrielramosnascimento195@gmail.com>"]
 description = "An asynchronous Rust library for interacting with the Asterisk Manager Interface (AMI), featuring a strongly-typed, stream-based API."
@@ -18,9 +18,15 @@ log = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2.0.12"
+utoipa = { version = "5.4.0", features = ["serde_extras"], optional = true }
 
 [dev-dependencies]
+chrono = "0.4.41"
 actix-web = "4"
 dotenv = "0.15.0"
 env_logger = "0.11.8"
 
+
+[features]
+default = []
+docs = ["utoipa"]

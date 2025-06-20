@@ -1,12 +1,12 @@
 //! # Asterisk Manager Library
 //!
-//! Uma biblioteca moderna, fortemente tipada e baseada em streams para integração com a Asterisk Manager Interface (AMI).
+//! A modern, strongly-typed, stream-based library for integration with the Asterisk Manager Interface (AMI).
 //!
-//! - **Mensagens AMI tipadas**: Actions, Events e Responses como enums/structs Rust.
-//! - **API baseada em streams**: Consuma eventos via `tokio_stream`.
-//! - **Operações assíncronas**: Totalmente baseada em Tokio.
+//! - **Typed AMI messages**: Actions, Events, and Responses as Rust enums/structs.
+//! - **Stream-based API**: Consume events via `tokio_stream`.
+//! - **Asynchronous operations**: Fully based on Tokio.
 //!
-//! ## Exemplo de Uso
+//! ## Usage Example
 //!
 //! ```rust,no_run
 //! use asterisk_manager::{Manager, ManagerOptions, AmiAction};
@@ -37,23 +37,24 @@
 //! }
 //! ```
 //!
-//! ## Funcionalidades
+//! ## Features
 //!
-//! - Login/logout, envio de ações e recebimento de eventos AMI.
-//! - Suporte a eventos comuns (`Newchannel`, `Hangup`, `PeerStatus`) e fallback para eventos desconhecidos.
-//! - Tratamento detalhado de erros via enum `AmiError`.
+//! - Login/logout, sending actions, and receiving AMI events.
+//! - Support for common events (`Newchannel`, `Hangup`, `PeerStatus`) and fallback for unknown events.
+//! - Detailed error handling via the `AmiError` enum.
 //!
-//! ## Requisitos
+//! ## Requirements
 //!
 //! - Rust 1.70+
-//! - Tokio (runtime assíncrono)
+//! - Tokio (asynchronous runtime)
 //!
-//! ## Licença
+//! ## License
 //!
 //! MIT
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -64,9 +65,12 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
+#[cfg(feature = "docs")]
+use utoipa::ToSchema;
 use uuid::Uuid;
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmiResponse {
     #[serde(rename = "Response")]
@@ -76,9 +80,11 @@ pub struct AmiResponse {
     #[serde(rename = "Message")]
     pub message: Option<String>,
     #[serde(flatten)]
-    pub fields: HashMap<String, String>,
+    #[cfg_attr(feature = "docs", schema(additional_properties = true))]
+    pub fields: HashMap<String, Value>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "Action", rename_all = "PascalCase")]
 pub enum AmiAction {
@@ -112,6 +118,7 @@ pub enum AmiAction {
     },
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewchannelEventData {
     #[serde(rename = "Channel")]
@@ -130,6 +137,7 @@ pub struct NewchannelEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HangupEventData {
     #[serde(rename = "Channel")]
@@ -144,6 +152,7 @@ pub struct HangupEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerStatusEventData {
     #[serde(rename = "Peer")]
@@ -154,7 +163,9 @@ pub struct PeerStatusEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
 pub enum AmiEvent {
     Newchannel(NewchannelEventData),
     Hangup(HangupEventData),
@@ -228,6 +239,8 @@ pub enum AmiError {
     ParseError(String),
     #[error("Serialize error: {0}")]
     SerializeError(String),
+    #[error("JSON error: {0}")]
+    SerdeJson(#[from] serde_json::Error),
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
     #[error("Action failed: {response:?}")]
@@ -306,15 +319,12 @@ impl Manager {
         let (write_tx, write_rx) = mpsc::channel::<String>(100);
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<String>(1024);
 
-        // --- Inicia as 3 tarefas de fundo ---
         spawn_writer_task(writer, write_rx);
         spawn_reader_task(reader, dispatch_tx);
         spawn_dispatcher_task(self.inner.clone(), dispatch_rx);
 
-        // Armazena o sender para o writer no estado interno
         self.inner.lock().await.write_tx = Some(write_tx);
 
-        // Tenta fazer o login
         let login_action = AmiAction::Login {
             username: options.username.clone(),
             secret: options.password.clone(),
@@ -344,37 +354,66 @@ impl Manager {
             if inner.write_tx.is_none() {
                 return Err(AmiError::NotConnected);
             }
-
-            // Coloca o "receptor da resposta" no mapa de pendências
             inner.pending_responses.insert(action_id.clone(), tx);
-
-            // Envia a string da ação para a Writer Task
             let writer = inner.write_tx.as_ref().unwrap();
             if writer.send(action_str).await.is_err() {
-                // Se o canal estiver fechado, a conexão caiu
                 inner.pending_responses.remove(&action_id);
                 return Err(AmiError::ConnectionClosed);
             }
         }
 
-        // Aguarda a resposta com timeout
-        match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(Ok(resp))) => {
-                if resp.response.eq_ignore_ascii_case("Error") {
-                    Err(AmiError::ActionFailed { response: resp })
-                } else {
-                    Ok(resp)
+        let initial_response = match timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(Ok(resp))) => resp,
+            Ok(Ok(Err(e))) => return Err(e),
+            Ok(Err(_)) => return Err(AmiError::ChannelError("Responder dropped".to_string())),
+            Err(_) => return Err(AmiError::Timeout),
+        };
+
+        if initial_response
+            .fields
+            .get("EventList")
+            .map_or(false, |v| v == "start")
+        {
+            let mut collected_events = Vec::new();
+            let mut stream = self.all_events_stream().await;
+
+            let collection_result = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(Ok(event)) = stream.next().await {
+                    if let AmiEvent::UnknownEvent { event_type, fields } = &event {
+                        if fields.get("ActionID").map_or(false, |id| id == &action_id) {
+                            if event_type.ends_with("Complete") {
+                                break;
+                            }
+                            collected_events.push(event.clone());
+                        }
+                    }
                 }
+            })
+            .await;
+
+            if collection_result.is_err() {
+                return Err(AmiError::Timeout);
             }
-            Ok(Ok(Err(e))) => Err(e),
-            Ok(Err(_)) => Err(AmiError::ChannelError("Responder dropped".to_string())),
-            Err(_) => Err(AmiError::Timeout),
+
+            let mut final_fields = initial_response.fields;
+            final_fields.insert(
+                "CollectedEvents".to_string(),
+                serde_json::to_value(collected_events)?,
+            );
+
+            Ok(AmiResponse {
+                response: initial_response.response,
+                action_id: initial_response.action_id,
+                message: Some(format!("Successfully collected events.")),
+                fields: final_fields,
+            })
+        } else {
+            Ok(initial_response)
         }
     }
 
     pub async fn disconnect(&self) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
-        // Ao remover o write_tx, o writer task encerrará.
         inner.write_tx = None;
         inner.authenticated = false;
         Ok(())
@@ -392,20 +431,16 @@ impl Manager {
     }
 }
 
-// --- TAREFAS DE FUNDO ---
-
-/// Tarefa 1: Apenas escreve na conexão TCP.
 fn spawn_writer_task(mut writer: OwnedWriteHalf, mut write_rx: mpsc::Receiver<String>) {
     tokio::spawn(async move {
         while let Some(action_str) = write_rx.recv().await {
             if writer.write_all(action_str.as_bytes()).await.is_err() {
-                break; // Erro de escrita, conexão provavelmente fechada
+                break;
             }
         }
     });
 }
 
-/// Tarefa 2: Apenas lê da conexão TCP e envia para o dispatcher.
 fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
     tokio::spawn(async move {
         let mut buf_reader = BufReader::new(reader);
@@ -415,7 +450,6 @@ fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
                 let mut line = String::new();
                 match buf_reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => {
-                        // Conexão fechada ou erro, encerra a tarefa
                         return;
                     }
                     Ok(_) => {
@@ -429,13 +463,12 @@ fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
             }
 
             if !message_block.trim().is_empty() && dispatch_tx.send(message_block).await.is_err() {
-                break; // Dispatcher morreu, não adianta continuar lendo
+                break;
             }
         }
     });
 }
 
-/// Tarefa 3: Apenas processa mensagens e as direciona.
 fn spawn_dispatcher_task(
     inner_arc: Arc<Mutex<InnerManager>>,
     mut dispatch_rx: mpsc::Receiver<String>,
