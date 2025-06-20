@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2025-06-20
+
+This release introduces a complete architectural overhaul for robust concurrency and adds intelligent features for handling complex AMI actions. It includes breaking changes to the connection API and response structures.
+
+### Added
+
+-   **Intelligent List Collection**: The `send_action` method now automatically detects actions that return lists of events (e.g., `PJSIPShowEndpoints`). It transparently collects all related events and bundles them into a single, aggregated `AmiResponse` in a new `CollectedEvents` field.
+-   **Optional API Documentation**: Added support for `utoipa` via a `docs` feature flag. When enabled, all public response and event types implement `ToSchema`, allowing consuming applications to easily generate OpenAPI/Swagger documentation.
+
+### Changed
+
+-   **BREAKING: Connection API**: The `Manager::new()` constructor no longer accepts `ManagerOptions`. The connection is now established via a new method `manager.connect_and_login(options)`, which requires a mutable `Manager` handle. This makes the connection lifecycle more explicit and robust.
+-   **BREAKING: `AmiResponse` Structure**: The `fields` field in `AmiResponse` was changed from `HashMap<String, String>` to `HashMap<String, serde_json::Value>` to support embedding the complex list of collected events from list-based actions.
+
+### Fixed
+
+-   **Concurrency Deadlock**: Re-architected the internal I/O handling to use dedicated, non-blocking tasks (Reader, Writer, Dispatcher). This resolves fundamental deadlock and timeout issues that occurred in high-concurrency environments (like web servers with multiple workers), ensuring actions are processed quickly and reliably.
+
+---
 
 ## [1.0.0] - 2025-06-12
 

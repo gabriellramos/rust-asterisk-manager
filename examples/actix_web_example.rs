@@ -1,8 +1,11 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use asterisk_manager::{AmiAction, AmiError, AmiEvent, AmiResponse, Manager, ManagerOptions};
+use chrono::Local;
+use env_logger::{Builder, Env};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -29,6 +32,7 @@ struct ActionRequest {
 struct ActionResponse {
     result: String,
     response: Option<AmiResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -57,10 +61,11 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> 
             attempts
         );
 
-        let new_manager = Manager::new(app_state.manager_options.clone());
-        match new_manager.connect_and_login().await {
+        match manager_guard
+            .connect_and_login(app_state.manager_options.clone())
+            .await
+        {
             Ok(_) => {
-                *manager_guard = new_manager;
                 info!("[RECONNECT] Reconnection successful!");
                 return Ok(());
             }
@@ -187,8 +192,6 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                     if event_type == Some("CoreShowChannel") {
                         if let Ok(value) = serde_json::to_value(fields) {
                             if let Some(uid) = value.get("Uniqueid") {
-                                // --- BEGIN FIX ---
-                                // Added explicit type annotation for `c`
                                 let is_duplicate = calls.iter().any(|c: &Value| {
                                     c.get("Uniqueid")
                                         .map_or(false, |existing_uid| existing_uid == uid)
@@ -197,7 +200,6 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                                 if !is_duplicate {
                                     calls.push(value);
                                 }
-                                // --- END FIX ---
                             }
                         }
                     } else if event_type == Some("CoreShowChannelsComplete") {
@@ -228,7 +230,20 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
+    Builder::from_env(Env::new().default_filter_or("info"))
+        .format(|buf, record| {
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                ts,
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
 
     let options = ManagerOptions {
         port: std::env::var("AMI_PORT")
@@ -241,7 +256,12 @@ async fn main() -> std::io::Result<()> {
         events: true,
     };
 
-    let initial_manager = Manager::new(options.clone());
+    let mut initial_manager = Manager::new();
+
+    if let Err(e) = initial_manager.connect_and_login(options.clone()).await {
+        error!("Failed to connect to AMI on startup: {}. The application will run, but will try to reconnect on first action.", e);
+    }
+
     let app_state = AppState {
         manager: Arc::new(Mutex::new(initial_manager)),
         events: Arc::new(Mutex::new(Vec::new())),
@@ -276,7 +296,6 @@ async fn main() -> std::io::Result<()> {
                         let mut evs = app_state_for_task.events.lock().await;
                         evs.push(event);
 
-                        // --- FIXED LOGIC ---
                         let len = evs.len();
                         if len > MAX_EVENT_BUFFER_SIZE {
                             let amount_to_drain = len - MAX_EVENT_BUFFER_SIZE;

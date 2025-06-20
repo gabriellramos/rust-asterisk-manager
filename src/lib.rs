@@ -21,8 +21,8 @@
 //!         password: "password".to_string(),
 //!         events: true,
 //!     };
-//!     let manager = Manager::new(options);
-//!     manager.connect_and_login().await.unwrap();
+//!     let mut manager = Manager::new();
+//!     manager.connect_and_login(options).await.unwrap();
 //!
 //!     let mut events = manager.all_events_stream().await;
 //!     tokio::spawn(async move {
@@ -46,7 +46,7 @@
 //! ## Requirements
 //!
 //! - Rust 1.70+
-//! - Tokio (async runtime)
+//! - Tokio (asynchronous runtime)
 //!
 //! ## License
 //!
@@ -54,30 +54,39 @@
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::Stream;
+#[cfg(feature = "docs")]
+use utoipa::ToSchema;
 use uuid::Uuid;
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmiResponse {
     #[serde(rename = "Response")]
     pub response: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "ActionID")]
     pub action_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "Message")]
     pub message: Option<String>,
     #[serde(flatten)]
-    pub fields: HashMap<String, String>,
+    #[cfg_attr(feature = "docs", schema(additional_properties = true))]
+    pub fields: HashMap<String, Value>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "Action", rename_all = "PascalCase")]
 pub enum AmiAction {
@@ -111,6 +120,7 @@ pub enum AmiAction {
     },
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewchannelEventData {
     #[serde(rename = "Channel")]
@@ -129,6 +139,7 @@ pub struct NewchannelEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HangupEventData {
     #[serde(rename = "Channel")]
@@ -143,6 +154,7 @@ pub struct HangupEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerStatusEventData {
     #[serde(rename = "Peer")]
@@ -153,7 +165,9 @@ pub struct PeerStatusEventData {
     pub other: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
 pub enum AmiEvent {
     Newchannel(NewchannelEventData),
     Hangup(HangupEventData),
@@ -227,6 +241,8 @@ pub enum AmiError {
     ParseError(String),
     #[error("Serialize error: {0}")]
     SerializeError(String),
+    #[error("JSON error: {0}")]
+    SerdeJson(#[from] serde_json::Error),
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
     #[error("Action failed: {response:?}")]
@@ -257,189 +273,167 @@ pub struct ManagerOptions {
 }
 
 struct InnerManager {
-    options: ManagerOptions,
-    connection: Option<TcpStream>,
     authenticated: bool,
+    /// Channel for sending raw AMI messages
+    write_tx: Option<mpsc::Sender<String>>,
+    /// Channel for receiving raw AMI messages
     event_broadcaster: broadcast::Sender<AmiEvent>,
+    /// Responders mapped for each action ID
     pending_responses: HashMap<String, oneshot::Sender<Result<AmiResponse, AmiError>>>,
 }
 
 #[derive(Clone)]
 pub struct Manager {
-    inner: Arc<Mutex<InnerManager>>,
+    pub(crate) inner: Arc<Mutex<InnerManager>>,
+}
+
+impl Default for Manager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Manager {
-    pub fn new(options: ManagerOptions) -> Self {
+    pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1024);
+        let inner = InnerManager {
+            authenticated: false,
+            write_tx: None,
+            event_broadcaster: event_tx,
+            pending_responses: HashMap::new(),
+        };
         Self {
-            inner: Arc::new(Mutex::new(InnerManager {
-                options,
-                connection: None,
-                authenticated: false,
-                event_broadcaster: event_tx,
-                pending_responses: HashMap::new(),
-            })),
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
-    pub async fn connect_and_login(&self) -> Result<(), AmiError> {
-        {
-            let mut inner = self.inner.lock().await;
-            inner.connect().await?;
-            inner.authenticate().await?;
+    pub async fn connect_and_login(&mut self, options: ManagerOptions) -> Result<(), AmiError> {
+        let stream = timeout(
+            Duration::from_secs(10),
+            TcpStream::connect((options.host.as_str(), options.port)),
+        )
+        .await
+        .map_err(|_| AmiError::Timeout)?
+        .map_err(AmiError::Io)?;
+
+        let (reader, writer) = stream.into_split();
+
+        let (write_tx, write_rx) = mpsc::channel::<String>(100);
+        let (dispatch_tx, dispatch_rx) = mpsc::channel::<String>(1024);
+
+        spawn_writer_task(writer, write_rx);
+        spawn_reader_task(reader, dispatch_tx);
+        spawn_dispatcher_task(self.inner.clone(), dispatch_rx);
+
+        self.inner.lock().await.write_tx = Some(write_tx);
+
+        let login_action = AmiAction::Login {
+            username: options.username.clone(),
+            secret: options.password.clone(),
+            events: Some("on".to_string()),
+            action_id: Some("rust-ami-login".to_string()),
+        };
+
+        match self.send_action(login_action).await {
+            Ok(resp) if resp.response.eq_ignore_ascii_case("Success") => {
+                self.inner.lock().await.authenticated = true;
+                Ok(())
+            }
+            Ok(resp) => Err(AmiError::AuthenticationFailed(
+                resp.message.unwrap_or_default(),
+            )),
+            Err(e) => Err(e),
         }
-        let this = self.clone();
-        tokio::spawn(async move {
-            let _ = this.read_loop().await;
-        });
-        Ok(())
     }
 
     pub async fn send_action(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
         let action_id = get_or_set_action_id(&mut action);
 
+        let mut stream = self.all_events_stream().await;
+
+        let initial_response = self.send_initial_request(action.clone()).await?;
+
+        if initial_response
+            .fields
+            .get("EventList")
+            .and_then(|v| v.as_str())
+            == Some("start")
+        {
+            let mut collected_events = Vec::new();
+
+            let collection_result = tokio::time::timeout(Duration::from_secs(10), async {
+                use tokio_stream::StreamExt;
+                while let Some(Ok(event)) = stream.next().await {
+                    if let AmiEvent::UnknownEvent { event_type, fields } = &event {
+                        if fields.get("ActionID").and_then(|id| Some(id.as_str()))
+                            == Some(&action_id)
+                        {
+                            if event_type.ends_with("Complete") {
+                                break;
+                            }
+                            collected_events.push(event.clone());
+                        }
+                    }
+                }
+            })
+            .await;
+
+            if collection_result.is_err() {
+                return Err(AmiError::Timeout);
+            }
+
+            let mut final_fields = initial_response.fields;
+            final_fields.insert(
+                "CollectedEvents".to_string(),
+                serde_json::to_value(&collected_events)?,
+            );
+
+            Ok(AmiResponse {
+                response: initial_response.response,
+                action_id: initial_response.action_id,
+                message: Some(format!("Successfully collected events.")),
+                fields: final_fields,
+            })
+        } else {
+            Ok(initial_response)
+        }
+    }
+
+    async fn send_initial_request(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
+        let action_id = get_or_set_action_id(&mut action);
         let (tx, rx) = oneshot::channel();
+        let action_str = serialize_ami_action(&action)?;
+
         {
             let mut inner = self.inner.lock().await;
-            if !inner.authenticated && !matches!(action, AmiAction::Login { .. }) {
-                return Err(AmiError::LoginRequired);
-            }
-            if inner.connection.is_none() {
+            if inner.write_tx.is_none() {
                 return Err(AmiError::NotConnected);
             }
-
             inner.pending_responses.insert(action_id.clone(), tx);
-            let action_str = serialize_ami_action(&action)?;
-            let conn = inner.connection.as_mut().ok_or(AmiError::NotConnected)?;
-
-            conn.write_all(action_str.as_bytes())
-                .await
-                .map_err(AmiError::Io)?;
-            conn.flush().await.map_err(AmiError::Io)?;
-        }
-        match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(Ok(resp))) => {
-                if resp.response.eq_ignore_ascii_case("Error") {
-                    Err(AmiError::ActionFailed { response: resp })
-                } else {
-                    Ok(resp)
-                }
+            let writer = inner.write_tx.as_ref().unwrap();
+            if writer.send(action_str).await.is_err() {
+                inner.pending_responses.remove(&action_id);
+                return Err(AmiError::ConnectionClosed);
             }
+        }
+
+        match timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(Ok(resp))) => Ok(resp),
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err(AmiError::ChannelError("Responder dropped".to_string())),
             Err(_) => Err(AmiError::Timeout),
         }
     }
 
-    async fn read_loop(&self) -> Result<(), AmiError> {
-        loop {
-            let processing_result: Result<(), AmiError> = async {
-                loop {
-                    let raw_data: String;
-                    {
-                        let mut inner = self.inner.lock().await;
-                        raw_data = inner.read_ami_message_raw().await?;
-                    }
-                    let parsed_messages = parse_ami_protocol_message(&raw_data)?;
-                    {
-                        let mut inner = self.inner.lock().await;
-                        for value_msg in parsed_messages {
-                            if value_msg.get("Event").is_some() {
-                                match serde_json::from_value::<AmiEvent>(value_msg.clone())
-                                    .map_err(|e| AmiError::ParseError(format!("AmiEvent: {}", e)))
-                                {
-                                    Ok(event) => {
-                                        let _ = inner.event_broadcaster.send(event);
-                                    }
-                                    Err(_) => {
-                                        let mut fallback = HashMap::new();
-                                        if let Some(obj) = value_msg.as_object() {
-                                            for (k, v) in obj {
-                                                if let Some(s) = v.as_str() {
-                                                    fallback.insert(k.clone(), s.to_string());
-                                                }
-                                            }
-                                        }
-                                        let _ =
-                                            inner.event_broadcaster.send(AmiEvent::UnknownEvent {
-                                                event_type: "ParseError".to_string(),
-                                                fields: fallback,
-                                            });
-                                    }
-                                }
-                            } else if value_msg.get("Response").is_some() {
-                                match serde_json::from_value::<AmiResponse>(value_msg.clone())
-                                    .map_err(|e| {
-                                        AmiError::ParseError(format!("AmiResponse: {}", e))
-                                    }) {
-                                    Ok(resp) => {
-                                        if let Some(action_id) = &resp.action_id {
-                                            if let Some(responder) =
-                                                inner.pending_responses.remove(action_id)
-                                            {
-                                                let _ = responder.send(Ok(resp));
-                                            }
-                                        }
-                                    }
-                                    Err(parse_err) => {
-                                        if let Some(action_id) =
-                                            value_msg.get("ActionID").and_then(|v| v.as_str())
-                                        {
-                                            if let Some(responder) =
-                                                inner.pending_responses.remove(action_id)
-                                            {
-                                                let _ = responder.send(Err(parse_err));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .await;
-
-            match processing_result {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    {
-                        let mut inner = self.inner.lock().await;
-                        inner.authenticated = false;
-                        inner.connection = None;
-                        for (_, responder) in inner.pending_responses.drain() {
-                            let _ = responder.send(Err(AmiError::ConnectionClosed));
-                        }
-                        let _ = inner
-                            .event_broadcaster
-                            .send(AmiEvent::InternalConnectionLost {
-                                error: format!("{}", err),
-                            });
-                    }
-                    return Err(err);
-                }
-            }
-        }
-    }
-
     pub async fn disconnect(&self) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
-        if let Some(mut connection) = inner.connection.take() {
-            let logoff_action = AmiAction::Logoff {
-                action_id: Some("rust-ami-logoff".to_string()),
-            };
-            let action_str = serialize_ami_action(&logoff_action)?;
-            let _ = connection.write_all(action_str.as_bytes()).await;
-            let _ = connection.shutdown().await;
-        }
+        inner.write_tx = None;
         inner.authenticated = false;
         Ok(())
     }
 
     pub async fn is_authenticated(&self) -> bool {
-        let inner = self.inner.lock().await;
-        inner.authenticated
+        self.inner.lock().await.authenticated
     }
 
     pub async fn all_events_stream(
@@ -450,82 +444,70 @@ impl Manager {
     }
 }
 
-impl InnerManager {
-    async fn connect(&mut self) -> Result<(), AmiError> {
-        let stream = timeout(
-            Duration::from_secs(10),
-            TcpStream::connect((self.options.host.as_str(), self.options.port)),
-        )
-        .await
-        .map_err(|_| AmiError::Timeout)?
-        .map_err(AmiError::Io)?;
-        self.connection = Some(stream);
-        let mut temp_buf = [0; 1024];
-        if let Some(conn) = self.connection.as_mut() {
-            let _ = conn.read(&mut temp_buf).await;
-        }
-        Ok(())
-    }
-
-    async fn authenticate(&mut self) -> Result<(), AmiError> {
-        let login_action = AmiAction::Login {
-            username: self.options.username.clone(),
-            secret: self.options.password.clone(),
-            events: Some(if self.options.events { "on" } else { "off" }.to_string()),
-            action_id: Some("rust-ami-login".to_string()),
-        };
-        let action_str = serialize_ami_action(&login_action)?;
-        let conn = self.connection.as_mut().ok_or(AmiError::NotConnected)?;
-        conn.write_all(action_str.as_bytes())
-            .await
-            .map_err(AmiError::Io)?;
-        let response_data = self.read_ami_message_raw().await?;
-        let parsed = parse_ami_protocol_message(&response_data)?;
-        for value_msg in parsed {
-            if let Ok(resp) = serde_json::from_value::<AmiResponse>(value_msg) {
-                if resp.response.eq_ignore_ascii_case("Success") {
-                    self.authenticated = true;
-                    return Ok(());
-                } else if resp.response.eq_ignore_ascii_case("Error") {
-                    return Err(AmiError::AuthenticationFailed(
-                        resp.message.unwrap_or_default(),
-                    ));
-                }
-            }
-        }
-        Err(AmiError::AuthenticationFailed(
-            "No valid success response received for login".to_string(),
-        ))
-    }
-
-    async fn read_ami_message_raw(&mut self) -> Result<String, AmiError> {
-        let mut buffer = vec![0; 8192];
-        let mut complete_data = String::new();
-
-        let (_local_addr_str, _peer_addr_str) = {
-            let conn_ref = self.connection.as_ref().ok_or(AmiError::NotConnected)?;
-            let local_addr = conn_ref.local_addr().map_err(AmiError::Io)?;
-            let peer_addr = conn_ref.peer_addr().map_err(AmiError::Io)?;
-            (local_addr.to_string(), peer_addr.to_string())
-        };
-
-        let connection = self.connection.as_mut().ok_or(AmiError::NotConnected)?;
-        loop {
-            let n = connection
-                .read(&mut buffer)
-                .await
-                .map_err(|e| AmiError::Io(e))?;
-            if n == 0 {
-                return Err(AmiError::ConnectionClosed);
-            }
-            let data_chunk_str = String::from_utf8_lossy(&buffer[..n]);
-            complete_data.push_str(&data_chunk_str);
-            if complete_data.ends_with("\r\n\r\n") {
+fn spawn_writer_task(mut writer: OwnedWriteHalf, mut write_rx: mpsc::Receiver<String>) {
+    tokio::spawn(async move {
+        while let Some(action_str) = write_rx.recv().await {
+            if writer.write_all(action_str.as_bytes()).await.is_err() {
                 break;
             }
         }
-        Ok(complete_data)
-    }
+    });
+}
+
+fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
+    tokio::spawn(async move {
+        let mut buf_reader = BufReader::new(reader);
+        loop {
+            let mut message_block = String::new();
+            loop {
+                let mut line = String::new();
+                match buf_reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => {
+                        return;
+                    }
+                    Ok(_) => {
+                        let is_end = line == "\r\n";
+                        message_block.push_str(&line);
+                        if is_end {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !message_block.trim().is_empty() && dispatch_tx.send(message_block).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_dispatcher_task(
+    inner_arc: Arc<Mutex<InnerManager>>,
+    mut dispatch_rx: mpsc::Receiver<String>,
+) {
+    tokio::spawn(async move {
+        while let Some(raw_message) = dispatch_rx.recv().await {
+            if let Ok(parsed_messages) = parse_ami_protocol_message(&raw_message) {
+                for value_msg in parsed_messages {
+                    let mut inner = inner_arc.lock().await;
+                    if value_msg.get("Response").is_some() {
+                        if let Ok(resp) = serde_json::from_value::<AmiResponse>(value_msg) {
+                            if let Some(action_id) = &resp.action_id {
+                                if let Some(responder) = inner.pending_responses.remove(action_id) {
+                                    let _ = responder.send(Ok(resp));
+                                }
+                            }
+                        }
+                    } else if value_msg.get("Event").is_some() {
+                        if let Ok(event) = serde_json::from_value::<AmiEvent>(value_msg.clone()) {
+                            let _ = inner.event_broadcaster.send(event);
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn parse_ami_protocol_message(raw_data: &str) -> Result<Vec<serde_json::Value>, AmiError> {
@@ -759,28 +741,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_new_and_auth_flag() {
-        let opts = ManagerOptions {
-            port: 5038,
-            host: "localhost".to_string(),
-            username: "admin".to_string(),
-            password: "pwd".to_string(),
-            events: false,
-        };
-        let manager = Manager::new(opts);
+        // A criação de `opts` não é mais necessária para este teste.
+        let manager = Manager::new(); // Manager::new() agora não tem argumentos.
         assert!(!manager.is_authenticated().await);
     }
 
     #[tokio::test]
     async fn test_event_internal_connection_lost() {
-        let opts = ManagerOptions {
-            port: 5038,
-            host: "localhost".to_string(),
-            username: "admin".to_string(),
-            password: "pwd".to_string(),
-            events: true,
-        };
-        let manager = Manager::new(opts);
+        // 1. Cria um manager vazio, como no teste anterior.
+        let manager = Manager::new();
+
+        // 2. Obtém o stream de eventos ANTES de enviar o evento.
         let mut stream = manager.all_events_stream().await;
+
+        // 3. Envia o evento internamente para simular uma desconexão.
+        //    Esta parte volta a funcionar por causa do `pub(crate)`.
         {
             let inner = manager.inner.lock().await;
             let _ = inner
@@ -789,6 +764,8 @@ mod tests {
                     error: "simulated".to_string(),
                 });
         }
+
+        // 4. Verifica se o evento foi recebido corretamente pelo stream.
         let ev = stream.next().await.unwrap().unwrap();
         match ev {
             AmiEvent::InternalConnectionLost { error } => {
