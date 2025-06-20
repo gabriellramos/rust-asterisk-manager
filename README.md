@@ -1,9 +1,9 @@
 # Asterisk Manager (asterisk-manager)
 
-[](https://crates.io/crates/asterisk-manager)
-[](https://docs.rs/asterisk-manager)
-[](https://opensource.org/licenses/MIT)
-[](https://github.com/gabriellramos/rust-asterisk-manager/actions/workflows/rust.yml)
+[![Crates.io](https://img.shields.io/crates/v/asterisk-manager.svg)](https://crates.io/crates/asterisk-manager)
+[![Docs.rs](https://docs.rs/asterisk-manager/badge.svg)](https://docs.rs/asterisk-manager)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/gabriellramos/rust-asterisk-manager/actions/workflows/rust.yml/badge.svg)](https://github.com/gabriellramos/rust-asterisk-manager/actions/workflows/rust.yml)
 
 A modern, asynchronous, strongly-typed, and stream-based library for interacting with the Asterisk Manager Interface (AMI) in Rust.
 
@@ -11,127 +11,92 @@ This crate simplifies communication with AMI by handling connection, authenticat
 
 ## Table of Contents
 
-- [✨ Features](https://www.google.com/search?q=%23-features)
-- [🚀 Getting Started](https://www.google.com/search?q=%23-getting-started)
-  - [1. Installation](https://www.google.com/search?q=%231-installation)
-  - [2. Usage Example](https://www.google.com/search?q=%232-usage-example)
-- [📖 Core Concepts](https://www.google.com/search?q=%23-core-concepts)
-  - [The `Manager`](https://www.google.com/search?q=%23the-manager)
-  - [Sending Actions](https://www.google.com/search?q=%23sending-actions)
-  - [Consuming Events](https://www.google.com/search?q=%23consuming-events)
-  - [Error Handling](https://www.google.com/search?q=%23error-handling)
-- [🔌 Reconnection Strategy](https://www.google.com/search?q=%23-reconnection-strategy)
-- [🤝 Contributing](https://www.google.com/search?q=%23-contributing)
-- [📜 License](https://www.google.com/search?q=%23-license)
-- [⭐ Acknowledgements](https://www.google.com/search?q=%23-acknowledgements)
+- [✨ Features](#-features)
+- [🚀 Getting Started](#-getting-started)
+  - [1. Installation](#1-installation)
+  - [2. Usage Example](#2-usage-example)
+- [📖 Core Concepts](#-core-concepts)
+  - [The `Manager`](#the-manager)
+  - [Sending Actions](#sending-actions)
+  - [Consuming Events](#consuming-events)
+- [📝 API Documentation with Utoipa](#-api-documentation-with-utoipa)
+- [🔌 Reconnection Strategy](#-reconnection-strategy)
+- [🤝 Contributing](#-contributing)
+- [📜 License](#-license)
 
 ## ✨ Features
 
-- **Strongly-Typed AMI Messages**: Actions, Events, and Responses are modeled as Rust `enum`s and `struct`s. This reduces runtime errors, improves safety, and enables powerful autocompletion in your editor.
-- **Stream-Based API**: Consume AMI events reactively and efficiently using the `Stream` abstraction from `tokio_stream`, integrating seamlessly with the Tokio ecosystem.
-- **Fully Asynchronous**: Built on Tokio for non-blocking, high-performance operations, ideal for concurrent applications.
-- **Robust Concurrency**: The internal architecture uses dedicated I/O tasks (Reader, Writer, and Dispatcher) to prevent deadlocks, ensuring high performance even when receiving a flood of events while sending actions.
-- **Action-Response Correlation**: Send an action and receive a `Future` that resolves to the corresponding response, making request/response logic straightforward.
-- **Detailed Error Handling**: A comprehensive `AmiError` enum allows robust handling of different failure scenarios (I/O, authentication, parsing, timeouts, etc.).
+-   **Strongly-Typed AMI Messages**: Actions, Events, and Responses are modeled as Rust `enum`s and `struct`s, improving type safety and enabling editor autocompletion.
+-   **Intelligent Action Handling**: The `send_action` method automatically detects actions that return lists of events (e.g., `PJSIPShowEndpoints`). It transparently collects all related events and bundles them into a single, aggregated `AmiResponse`.
+-   **Robust Concurrency**: The internal architecture uses dedicated I/O tasks (Reader, Writer, and Dispatcher) to prevent deadlocks, ensuring high performance even when receiving a flood of events while sending actions.
+-   **Stream-Based API**: Consume AMI events reactively and efficiently using the `Stream` abstraction from `tokio_stream`.
+-   **Optional OpenAPI/Swagger Support**: Includes a `docs` feature flag to enable `utoipa::ToSchema` implementations on all public types, allowing for automatic and accurate API documentation generation.
+-   **Detailed Error Handling**: A comprehensive `AmiError` enum allows robust handling of different failure scenarios.
 
 ## 🚀 Getting Started
 
-### 1\. Installation
+### 1. Installation
 
-Add `asterisk-manager` to your `Cargo.toml`. The library requires Tokio as the async runtime.
+Add `asterisk-manager` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-asterisk-manager = "1.0.0" # Replace with the latest version
+asterisk-manager = "2.0.0" # Or the latest version
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-log = "0.4"
 ```
 
-*The dependencies `serde`, `serde_json`, and `uuid` are managed by `asterisk-manager`.*
+To enable automatic API documentation support for frameworks like Actix-web or Axum, enable the `docs` feature:
 
-### 2\. Usage Example
+```toml
+[dependencies]
+asterisk-manager = { version = "2.0.0", features = ["docs"] }
+```
 
-This example connects to AMI, listens for events in a separate task, sends a `Ping` action, and awaits the response.
+### 2. Usage Example
+
+This example connects to AMI, sends a simple action (`Ping`), and then sends a list-based action (`PJSIPShowEndpoints`), demonstrating how `send_action` handles both transparently.
 
 ```rust,no_run
-use asterisk_manager::{Manager, ManagerOptions, AmiAction, AmiEvent};
+use asterisk_manager::{Manager, ManagerOptions, AmiAction};
 use tokio_stream::StreamExt;
-use std::time::Duration;
+use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Define connection options
     let options = ManagerOptions {
         port: 5038,
         host: "127.0.0.1".to_string(),
         username: "admin".to_string(),
         password: "password".to_string(),
-        events: true, // Enable receiving all events
+        events: true,
     };
 
-    // 2. Create a new, empty Manager instance
     let mut manager = Manager::new();
+    manager.connect_and_login(options).await?;
+    println!("Successfully connected to AMI!");
 
-    // 3. Connect and login. This step now receives the options and starts the internal tasks.
-    if let Err(e) = manager.connect_and_login(options).await {
-        eprintln!("Failed to connect and login: {}", e);
-        return Err(e.into());
-    }
-    println!("Connected and logged in to AMI!");
-
-    // 4. Obtain a stream for all AMI events
-    let mut event_stream = manager.all_events_stream().await;
-
-    // 5. Start a task to continuously consume events
-    tokio::spawn(async move {
-        println!("Event task started. Waiting for events...");
-        while let Some(event_result) = event_stream.next().await {
-            match event_result {
-                Ok(event) => {
-                    // Handle the event
-                    match event {
-                        AmiEvent::PeerStatus(status) => {
-                            println!("[Event] Peer Status: {} -> {}", status.peer, status.peer_status);
-                        }
-                        AmiEvent::Newchannel(new_channel) => {
-                            println!("[Event] New channel created: {}", new_channel.channel);
-                        }
-                        _ => {
-                            // Print other events
-                            // println!("[Event] Received: {:?}", event);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Event stream error: {}", e);
-                    // The stream breaking likely means the connection was lost.
-                    break;
-                }
-            }
-        }
-        println!("Event task ended.");
-    });
-
-    // 6. Send an action and await the response
-    println!("Sending Ping...");
+    // Send a simple action
+    println!("\n--- Sending a simple action (Ping) ---");
     let ping_action = AmiAction::Ping { action_id: None };
-    match manager.send_action(ping_action).await {
-        Ok(response) => {
-            println!("Ping response received: {:?}", response);
-        }
-        Err(e) => {
-            eprintln!("Failed to send Ping action: {}", e);
-        }
+    let ping_response = manager.send_action(ping_action).await?;
+    println!("Ping Response: {:?}", ping_response);
+
+    // Send a list-based action
+    println!("\n--- Sending a list-based action (PJSIPShowEndpoints) ---");
+    let list_action = AmiAction::Custom { 
+        action: "PJSIPShowEndpoints".to_string(), 
+        params: HashMap::new(),
+        action_id: None 
+    };
+    let list_response = manager.send_action(list_action).await?;
+    if let Some(events) = list_response.fields.get("CollectedEvents") {
+        println!("Collected {} events.", events.as_array().map_or(0, |a| a.len()));
+        // println!("Collected Events JSON: {}", events);
     }
-
-    // Give some time for the event task to receive something (for this example only)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // 7. Disconnect
+    
     manager.disconnect().await?;
-    println!("Disconnected.");
-
+    println!("\nDisconnected.");
     Ok(())
 }
 ```
@@ -140,56 +105,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### The `Manager`
 
-The `Manager` struct is the main entry point of the library. It acts as a handle for the AMI connection. You first create an empty `Manager` with `Manager::new()` and then establish a connection with `manager.connect_and_login(options).await`. The `connect_and_login` method starts the internal I/O tasks that read and process all messages from the Asterisk server.
-
-`Manager` is `Clone`, `Send`, and `Sync`, allowing it to be safely shared between multiple tasks, such as in a web application using Actix Web or Axum.
+The `Manager` struct is the main entry point. You first create an empty `Manager` with `Manager::new()` and then establish a connection with `manager.connect_and_login(options).await`. This method starts the internal, non-blocking I/O tasks. `Manager` is `Clone`, `Send`, and `Sync`, allowing it to be safely shared between multiple tasks.
 
 ### Sending Actions
 
-To send an action to Asterisk, use the `manager.send_action()` method. It accepts an instance of the `AmiAction` enum and returns a `Future`.
-
-```rust
-let action = AmiAction::Command {
-    command: "sip show peers".to_string(),
-    action_id: None, // The library generates a ActionID if None
-};
-
-let response_result = manager.send_action(action).await;
-```
-
-The `Future` resolves to a `Result<AmiResponse, AmiError>`. This allows you to asynchronously await the direct response to your action (e.g., `Response: Success` or `Response: Error`).
+Use the `manager.send_action()` method. It intelligently handles different types of responses:
+-   For simple actions like `Ping`, it returns the direct response immediately.
+-   For actions that return a list (e.g., `PJSIPShowEndpoints`), it automatically collects all related events, bundles them into a `CollectedEvents` field in the final `AmiResponse`, and returns after the list is complete.
 
 ### Consuming Events
 
-The library uses a "fan-out" approach for events. A single I/O task reads all events from Asterisk and broadcasts them to all interested consumers via a `broadcast::channel`.
+The library uses a broadcast channel to fan-out events. To consume them, obtain a stream with `manager.all_events_stream().await`. This allows multiple parts of your application to independently listen to the same AMI events.
 
-To consume events, obtain a stream with `manager.all_events_stream().await`.
-
-```rust
+```rust,no_run
 let mut stream = manager.all_events_stream().await;
-
-while let Some(result) = stream.next().await {
-    if let Ok(event) = result {
-        println!("Event received: {:?}", event);
-    }
+while let Some(Ok(event)) = stream.next().await {
+    println!("Event received: {:?}", event);
 }
 ```
 
-This allows multiple parts of your application to independently and concurrently listen to the same AMI events without blocking each other.
+## 📝 API Documentation with Utoipa
 
-### Error Handling
+This library provides optional support for `utoipa` to automatically generate OpenAPI (Swagger) schemas for your web application.
 
-All fallible operations return `Result<T, AmiError>`. The `AmiError` enum describes the error source, allowing granular failure handling.
+To enable it, add the `docs` feature in your `Cargo.toml`:
+```toml
+asterisk-manager = { version = "2.0.0", features = ["docs"] }
+```
+With this feature enabled, all public types like `AmiResponse` and `AmiEvent` will derive `utoipa::ToSchema`. You can then reference them directly in your Actix-web or Axum controller documentation.
 
-```rust
-let mut manager = Manager::new();
-match manager.connect_and_login(options).await {
-    Ok(_) => println!("Success!"),
-    Err(AmiError::Io(e)) => eprintln!("I/O error: {}", e),
-    Err(AmiError::AuthenticationFailed(reason)) => eprintln!("Authentication failed: {}", reason),
-    Err(AmiError::Timeout) => eprintln!("Operation timed out"),
-    Err(e) => eprintln!("Other error: {}", e),
-}
+```rust,ignore
+// In your application's controller
+use asterisk_manager::AmiResponse;
+use utoipa::OpenApi;
+
+#[derive(OpenApi)]
+#[openapi(
+    //...
+    components(
+        schemas(AmiResponse) // This now works directly!
+    )
+)]
+pub struct ApiDoc;
 ```
 
 ## 🔌 Reconnection Strategy
