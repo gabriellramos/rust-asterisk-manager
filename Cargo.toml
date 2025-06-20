@@ -7,7 +7,7 @@ description = "An asynchronous Rust library for interacting with the Asterisk Ma
 readme = "README.md"
 repository = "https://github.com/gabriellramos/rust-asterisk-manager"
 license-file = "LICENSE"
-keywords = ["asterisk", "ami", "voip", "manager", "async", "stream"]
+keywords = ["asterisk", "ami", "voip", "manager", "async"]
 categories = ["network-programming", "api-bindings", "asynchronous"]
 
 [dependencies]
