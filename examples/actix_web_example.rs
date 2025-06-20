@@ -57,10 +57,11 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> 
             attempts
         );
 
-        let new_manager = Manager::new(app_state.manager_options.clone());
-        match new_manager.connect_and_login().await {
+        match manager_guard
+            .connect_and_login(app_state.manager_options.clone())
+            .await
+        {
             Ok(_) => {
-                *manager_guard = new_manager;
                 info!("[RECONNECT] Reconnection successful!");
                 return Ok(());
             }
@@ -241,7 +242,12 @@ async fn main() -> std::io::Result<()> {
         events: true,
     };
 
-    let initial_manager = Manager::new(options.clone());
+    let mut initial_manager = Manager::new();
+
+    if let Err(e) = initial_manager.connect_and_login(options.clone()).await {
+        error!("Failed to connect to AMI on startup: {}. The application will run, but will try to reconnect on first action.", e);
+    }
+
     let app_state = AppState {
         manager: Arc::new(Mutex::new(initial_manager)),
         events: Arc::new(Mutex::new(Vec::new())),
