@@ -65,7 +65,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 #[cfg(feature = "docs")]
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -75,8 +75,10 @@ use uuid::Uuid;
 pub struct AmiResponse {
     #[serde(rename = "Response")]
     pub response: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "ActionID")]
     pub action_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "Message")]
     pub message: Option<String>,
     #[serde(flatten)]
@@ -346,41 +348,26 @@ impl Manager {
 
     pub async fn send_action(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
         let action_id = get_or_set_action_id(&mut action);
-        let (tx, rx) = oneshot::channel();
-        let action_str = serialize_ami_action(&action)?;
 
-        {
-            let mut inner = self.inner.lock().await;
-            if inner.write_tx.is_none() {
-                return Err(AmiError::NotConnected);
-            }
-            inner.pending_responses.insert(action_id.clone(), tx);
-            let writer = inner.write_tx.as_ref().unwrap();
-            if writer.send(action_str).await.is_err() {
-                inner.pending_responses.remove(&action_id);
-                return Err(AmiError::ConnectionClosed);
-            }
-        }
+        let mut stream = self.all_events_stream().await;
 
-        let initial_response = match timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(Ok(resp))) => resp,
-            Ok(Ok(Err(e))) => return Err(e),
-            Ok(Err(_)) => return Err(AmiError::ChannelError("Responder dropped".to_string())),
-            Err(_) => return Err(AmiError::Timeout),
-        };
+        let initial_response = self.send_initial_request(action.clone()).await?;
 
         if initial_response
             .fields
             .get("EventList")
-            .map_or(false, |v| v == "start")
+            .and_then(|v| v.as_str())
+            == Some("start")
         {
             let mut collected_events = Vec::new();
-            let mut stream = self.all_events_stream().await;
 
             let collection_result = tokio::time::timeout(Duration::from_secs(10), async {
+                use tokio_stream::StreamExt;
                 while let Some(Ok(event)) = stream.next().await {
                     if let AmiEvent::UnknownEvent { event_type, fields } = &event {
-                        if fields.get("ActionID").map_or(false, |id| id == &action_id) {
+                        if fields.get("ActionID").and_then(|id| Some(id.as_str()))
+                            == Some(&action_id)
+                        {
                             if event_type.ends_with("Complete") {
                                 break;
                             }
@@ -398,7 +385,7 @@ impl Manager {
             let mut final_fields = initial_response.fields;
             final_fields.insert(
                 "CollectedEvents".to_string(),
-                serde_json::to_value(collected_events)?,
+                serde_json::to_value(&collected_events)?,
             );
 
             Ok(AmiResponse {
@@ -409,6 +396,32 @@ impl Manager {
             })
         } else {
             Ok(initial_response)
+        }
+    }
+
+    async fn send_initial_request(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
+        let action_id = get_or_set_action_id(&mut action);
+        let (tx, rx) = oneshot::channel();
+        let action_str = serialize_ami_action(&action)?;
+
+        {
+            let mut inner = self.inner.lock().await;
+            if inner.write_tx.is_none() {
+                return Err(AmiError::NotConnected);
+            }
+            inner.pending_responses.insert(action_id.clone(), tx);
+            let writer = inner.write_tx.as_ref().unwrap();
+            if writer.send(action_str).await.is_err() {
+                inner.pending_responses.remove(&action_id);
+                return Err(AmiError::ConnectionClosed);
+            }
+        }
+
+        match timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(Ok(resp))) => Ok(resp),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(AmiError::ChannelError("Responder dropped".to_string())),
+            Err(_) => Err(AmiError::Timeout),
         }
     }
 
