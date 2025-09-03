@@ -197,7 +197,9 @@ This library **does not** include built-in automatic reconnection logic by desig
 
 When the connection is lost, methods like `send_action` will return an `AmiError::ConnectionClosed`, and the event stream will end. Your application should handle these signals by creating a new `Manager` instance and calling `connect_and_login` again.
 
-For a complete and robust example of a web application with resilient reconnection logic, see the [**`examples/actix_web_example.rs`**](https://www.google.com/search?q=examples/actix_web_example.rs) file in this repository.
+For a complete and robust example of a web application with resilient reconnection logic, see the [**`examples/actix_web_example.rs`**](examples/actix_web_example.rs) file in this repository.
+
+For a basic demonstration of the library's features including the new actions and events, see [**`examples/basic_usage.rs`**](examples/basic_usage.rs).
 
 ## 🤝 Contributing
 
