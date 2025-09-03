@@ -19,6 +19,7 @@ This crate simplifies communication with AMI by handling connection, authenticat
   - [The `Manager`](#the-manager)
   - [Sending Actions](#sending-actions)
   - [Consuming Events](#consuming-events)
+- [🌐 Multi-Asterisk Cluster Support](#-multi-asterisk-cluster-support)
 - [📝 API Documentation with Utoipa](#-api-documentation-with-utoipa)
 - [🔌 Reconnection Strategy](#-reconnection-strategy)
 - [🤝 Contributing](#-contributing)
@@ -27,6 +28,7 @@ This crate simplifies communication with AMI by handling connection, authenticat
 ## ✨ Features
 
 -   **Strongly-Typed AMI Messages**: Actions, Events, and Responses are modeled as Rust `enum`s and `struct`s, improving type safety and enabling editor autocompletion.
+-   **Multi-Asterisk Cluster Support**: Built-in support for managing multiple Asterisk AMI connections simultaneously with unified event streams and flexible action routing.
 -   **Intelligent Action Handling**: The `send_action` method automatically detects actions that return lists of events (e.g., `PJSIPShowEndpoints`). It transparently collects all related events and bundles them into a single, aggregated `AmiResponse`.
 -   **Robust Concurrency**: The internal architecture uses dedicated I/O tasks (Reader, Writer, and Dispatcher) to prevent deadlocks, ensuring high performance even when receiving a flood of events while sending actions.
 -   **Stream-Based API**: Consume AMI events reactively and efficiently using the `Stream` abstraction from `tokio_stream`.
@@ -123,6 +125,81 @@ while let Some(Ok(event)) = stream.next().await {
     println!("Event received: {:?}", event);
 }
 ```
+
+
+## 🌐 Multi-Asterisk Cluster Support
+
+This library includes built-in support for managing multiple Asterisk AMI connections simultaneously through the `AsteriskClusterManager`. This is ideal for:
+
+- High-availability VoIP systems
+- Geo-distributed Asterisk deployments  
+- Load-balanced call center infrastructure
+- Multi-tenant hosted PBX platforms
+
+### Basic Cluster Usage
+
+```rust,no_run
+use asterisk_manager::cluster::AsteriskClusterManager;
+use asterisk_manager::{ManagerOptions, AmiAction};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cluster = AsteriskClusterManager::new();
+    
+    // Add nodes to the cluster
+    let eu_config = ManagerOptions {
+        host: "asterisk-eu.example.com".to_string(),
+        port: 5038,
+        username: "admin".to_string(),
+        password: "secret".to_string(),
+        events: true,
+    };
+    cluster.add_node("asterisk-eu", eu_config).await?;
+    
+    let us_config = ManagerOptions {
+        host: "asterisk-us.example.com".to_string(),
+        port: 5038,
+        username: "admin".to_string(),
+        password: "secret".to_string(),
+        events: true,
+    };
+    cluster.add_node("asterisk-us", us_config).await?;
+    
+    // Send action to specific node
+    cluster.send_to("asterisk-eu", AmiAction::Ping { action_id: None }).await?;
+    
+    // Broadcast action to all nodes
+    let results = cluster.broadcast(AmiAction::Command { 
+        command: "core show version".to_string(),
+        action_id: None 
+    }).await;
+    
+    // Unified event stream from all nodes
+    let mut events = cluster.event_stream().await;
+    while let Some(event) = events.next().await {
+        match event {
+            Ok(cluster_event) => {
+                println!("[{}] Event: {:?}", cluster_event.node_id, cluster_event.event);
+            }
+            Err(e) => eprintln!("Event error: {}", e),
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### Cluster Features
+
+- **Dynamic Node Management**: Add and remove nodes at runtime
+- **Flexible Action Routing**: Send to specific nodes, broadcast to all, or filter by criteria
+- **Unified Event Streams**: Receive events from all nodes with node identification
+- **Independent Lifecycles**: Each node manages its own connection and reconnection
+- **Health Monitoring**: Check connection status across all nodes
+- **Graceful Shutdown**: Cleanly disconnect all nodes
+
+For a complete example, see [`examples/cluster_example.rs`](https://github.com/gabriellramos/rust-asterisk-manager/blob/master/examples/cluster_example.rs).
 
 ## 📝 API Documentation with Utoipa
 

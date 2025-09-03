@@ -4,9 +4,10 @@
 //!
 //! - **Typed AMI messages**: Actions, Events, and Responses as Rust enums/structs.
 //! - **Stream-based API**: Consume events via `tokio_stream`.
+//! - **Multi-Asterisk cluster support**: Manage multiple AMI connections simultaneously.
 //! - **Asynchronous operations**: Fully based on Tokio.
 //!
-//! ## Usage Example
+//! ## Single Manager Usage Example
 //!
 //! ```rust,no_run
 //! use asterisk_manager::{Manager, ManagerOptions, AmiAction};
@@ -37,9 +38,48 @@
 //! }
 //! ```
 //!
+//! ## Cluster Usage Example
+//!
+//! ```rust,no_run
+//! use asterisk_manager::cluster::AsteriskClusterManager;
+//! use asterisk_manager::{ManagerOptions, AmiAction};
+//! use tokio_stream::StreamExt;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let cluster = AsteriskClusterManager::new();
+//!     
+//!     // Add multiple nodes
+//!     let config = ManagerOptions {
+//!         host: "asterisk-1.example.com".to_string(),
+//!         port: 5038,
+//!         username: "admin".to_string(),
+//!         password: "secret".to_string(),
+//!         events: true,
+//!     };
+//!     cluster.add_node("node1", config).await?;
+//!     
+//!     // Send to specific node or broadcast to all
+//!     cluster.send_to("node1", AmiAction::Ping { action_id: None }).await?;
+//!     cluster.broadcast(AmiAction::Command { 
+//!         command: "core show version".to_string(), 
+//!         action_id: None 
+//!     }).await;
+//!     
+//!     // Unified event stream from all nodes
+//!     let mut events = cluster.event_stream().await;
+//!     while let Some(Ok(cluster_event)) = events.next().await {
+//!         println!("[{}] {:?}", cluster_event.node_id, cluster_event.event);
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//!
 //! ## Features
 //!
 //! - Login/logout, sending actions, and receiving AMI events.
+//! - Multi-Asterisk cluster support with unified event streams.
 //! - Support for common events (`Newchannel`, `Hangup`, `PeerStatus`) and fallback for unknown events.
 //! - Detailed error handling via the `AmiError` enum.
 //!
@@ -51,6 +91,8 @@
 //! ## License
 //!
 //! MIT
+
+pub mod cluster;
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
