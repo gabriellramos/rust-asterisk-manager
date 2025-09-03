@@ -111,6 +111,21 @@ pub enum AmiAction {
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
+    Originate {
+        channel: String,
+        context: String,
+        exten: String,
+        priority: String,
+        #[serde(rename = "CallerID")]
+        caller_id: Option<String>,
+        timeout: Option<u32>,
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
+    Status {
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
     Custom {
         action: String,
         #[serde(flatten)]
@@ -166,12 +181,48 @@ pub struct PeerStatusEventData {
 }
 
 #[cfg_attr(feature = "docs", derive(ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeEnterEventData {
+    #[serde(rename = "Channel")]
+    pub channel: String,
+    #[serde(rename = "Uniqueid")]
+    pub uniqueid: String,
+    #[serde(rename = "BridgeUniqueid")]
+    pub bridge_uniqueid: String,
+    #[serde(rename = "BridgeName")]
+    pub bridge_name: Option<String>,
+    #[serde(rename = "BridgeType")]
+    pub bridge_type: Option<String>,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
+}
+
+#[cfg_attr(feature = "docs", derive(ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeLeaveEventData {
+    #[serde(rename = "Channel")]
+    pub channel: String,
+    #[serde(rename = "Uniqueid")]
+    pub uniqueid: String,
+    #[serde(rename = "BridgeUniqueid")]
+    pub bridge_uniqueid: String,
+    #[serde(rename = "BridgeName")]
+    pub bridge_name: Option<String>,
+    #[serde(rename = "BridgeType")]
+    pub bridge_type: Option<String>,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
+}
+
+#[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum AmiEvent {
     Newchannel(NewchannelEventData),
     Hangup(HangupEventData),
     PeerStatus(PeerStatusEventData),
+    BridgeEnter(BridgeEnterEventData),
+    BridgeLeave(BridgeLeaveEventData),
     UnknownEvent {
         event_type: String,
         fields: HashMap<String, String>,
@@ -207,6 +258,14 @@ impl<'de> Deserialize<'de> for AmiEvent {
                 )),
                 "PeerStatus" => Ok(AmiEvent::PeerStatus(
                     PeerStatusEventData::deserialize(value.clone())
+                        .map_err(serde::de::Error::custom)?,
+                )),
+                "BridgeEnter" => Ok(AmiEvent::BridgeEnter(
+                    BridgeEnterEventData::deserialize(value.clone())
+                        .map_err(serde::de::Error::custom)?,
+                )),
+                "BridgeLeave" => Ok(AmiEvent::BridgeLeave(
+                    BridgeLeaveEventData::deserialize(value.clone())
                         .map_err(serde::de::Error::custom)?,
                 )),
                 _ => {
@@ -365,7 +424,7 @@ impl Manager {
                 use tokio_stream::StreamExt;
                 while let Some(Ok(event)) = stream.next().await {
                     if let AmiEvent::UnknownEvent { event_type, fields } = &event {
-                        if fields.get("ActionID").and_then(|id| Some(id.as_str()))
+                        if fields.get("ActionID").map(|id| id.as_str())
                             == Some(&action_id)
                         {
                             if event_type.ends_with("Complete") {
@@ -391,7 +450,7 @@ impl Manager {
             Ok(AmiResponse {
                 response: initial_response.response,
                 action_id: initial_response.action_id,
-                message: Some(format!("Successfully collected events.")),
+                message: Some("Successfully collected events.".to_string()),
                 fields: final_fields,
             })
         } else {
@@ -434,6 +493,25 @@ impl Manager {
 
     pub async fn is_authenticated(&self) -> bool {
         self.inner.lock().await.authenticated
+    }
+
+    /// Performs a health check by sending a Ping action to verify the connection is active
+    pub async fn health_check(&self) -> Result<bool, AmiError> {
+        if !self.is_authenticated().await {
+            return Ok(false);
+        }
+        
+        match self.send_action(AmiAction::Ping { action_id: None }).await {
+            Ok(_) => Ok(true),
+            Err(AmiError::ConnectionClosed) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Returns the current connection status
+    pub async fn is_connected(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.write_tx.is_some() && inner.authenticated
     }
 
     pub async fn all_events_stream(
@@ -570,6 +648,36 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
                 s.push_str(&format!("ActionID: {}\r\n", id));
             }
         }
+        AmiAction::Originate {
+            channel,
+            context,
+            exten,
+            priority,
+            caller_id,
+            timeout,
+            action_id,
+        } => {
+            s.push_str("Action: Originate\r\n");
+            s.push_str(&format!("Channel: {}\r\n", channel));
+            s.push_str(&format!("Context: {}\r\n", context));
+            s.push_str(&format!("Exten: {}\r\n", exten));
+            s.push_str(&format!("Priority: {}\r\n", priority));
+            if let Some(cid) = caller_id {
+                s.push_str(&format!("CallerID: {}\r\n", cid));
+            }
+            if let Some(to) = timeout {
+                s.push_str(&format!("Timeout: {}\r\n", to));
+            }
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
+        AmiAction::Status { action_id } => {
+            s.push_str("Action: Status\r\n");
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {}\r\n", id));
+            }
+        }
         AmiAction::Custom {
             action: action_name,
             params,
@@ -594,6 +702,8 @@ fn get_or_set_action_id(action: &mut AmiAction) -> String {
         | AmiAction::Logoff { action_id }
         | AmiAction::Ping { action_id }
         | AmiAction::Command { action_id, .. }
+        | AmiAction::Originate { action_id, .. }
+        | AmiAction::Status { action_id }
         | AmiAction::Custom { action_id, .. } => {
             if let Some(id) = action_id {
                 id.clone()
@@ -706,6 +816,70 @@ mod tests {
             }
             _ => panic!("Expected AmiEvent::PeerStatus"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_bridge_enter_event() {
+        let raw = "Event: BridgeEnter\r\nChannel: SIP/100-00000001\r\nUniqueid: 1234\r\nBridgeUniqueid: bridge123\r\nBridgeName: Conference\r\nBridgeType: mixing\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::BridgeEnter(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+                assert_eq!(data.uniqueid, "1234");
+                assert_eq!(data.bridge_uniqueid, "bridge123");
+                assert_eq!(data.bridge_name.as_deref(), Some("Conference"));
+                assert_eq!(data.bridge_type.as_deref(), Some("mixing"));
+            }
+            _ => panic!("Expected AmiEvent::BridgeEnter"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_bridge_leave_event() {
+        let raw = "Event: BridgeLeave\r\nChannel: SIP/100-00000001\r\nUniqueid: 1234\r\nBridgeUniqueid: bridge123\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::BridgeLeave(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+                assert_eq!(data.uniqueid, "1234");
+                assert_eq!(data.bridge_uniqueid, "bridge123");
+            }
+            _ => panic!("Expected AmiEvent::BridgeLeave"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_originate_action() {
+        let action = AmiAction::Originate {
+            channel: "SIP/100".to_string(),
+            context: "default".to_string(),
+            exten: "123".to_string(),
+            priority: "1".to_string(),
+            caller_id: Some("Test <123>".to_string()),
+            timeout: Some(30000),
+            action_id: Some("test123".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: SIP/100"));
+        assert!(s.contains("Context: default"));
+        assert!(s.contains("Exten: 123"));
+        assert!(s.contains("Priority: 1"));
+        assert!(s.contains("CallerID: Test <123>"));
+        assert!(s.contains("Timeout: 30000"));
+        assert!(s.contains("ActionID: test123"));
+    }
+
+    #[test]
+    fn test_serialize_status_action() {
+        let action = AmiAction::Status {
+            action_id: Some("test456".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Status"));
+        assert!(s.contains("ActionID: test456"));
     }
 
     #[test]

@@ -30,6 +30,9 @@ This crate simplifies communication with AMI by handling connection, authenticat
 -   **Intelligent Action Handling**: The `send_action` method automatically detects actions that return lists of events (e.g., `PJSIPShowEndpoints`). It transparently collects all related events and bundles them into a single, aggregated `AmiResponse`.
 -   **Robust Concurrency**: The internal architecture uses dedicated I/O tasks (Reader, Writer, and Dispatcher) to prevent deadlocks, ensuring high performance even when receiving a flood of events while sending actions.
 -   **Stream-Based API**: Consume AMI events reactively and efficiently using the `Stream` abstraction from `tokio_stream`.
+-   **Common AMI Actions**: Built-in support for frequently used actions like `Originate`, `Status`, `Ping`, `Login`, `Logoff`, and `Command`.
+-   **Bridge Event Support**: Native support for `BridgeEnter` and `BridgeLeave` events for call bridging scenarios.
+-   **Connection Health Monitoring**: Built-in health check methods to verify connection status and perform connectivity tests.
 -   **Optional OpenAPI/Swagger Support**: Includes a `docs` feature flag to enable `utoipa::ToSchema` implementations on all public types, allowing for automatic and accurate API documentation generation.
 -   **Detailed Error Handling**: A comprehensive `AmiError` enum allows robust handling of different failure scenarios.
 
@@ -101,6 +104,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Using New Action Types
+
+```rust,no_run
+use asterisk_manager::{Manager, ManagerOptions, AmiAction};
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = ManagerOptions { /* ... */ };
+    let mut manager = Manager::new();
+    manager.connect_and_login(options).await?;
+
+    // Check connection health
+    if manager.health_check().await? {
+        println!("Connection is healthy!");
+    }
+
+    // Make an originate call
+    let originate_action = AmiAction::Originate {
+        channel: "SIP/1001".to_string(),
+        context: "default".to_string(),
+        exten: "1002".to_string(),
+        priority: "1".to_string(),
+        caller_id: Some("Automated Call <1001>".to_string()),
+        timeout: Some(30000),
+        action_id: None,
+    };
+    let response = manager.send_action(originate_action).await?;
+    println!("Originate response: {:?}", response);
+
+    // Get channel status
+    let status_action = AmiAction::Status { action_id: None };
+    let status_response = manager.send_action(status_action).await?;
+    println!("Status response: {:?}", status_response);
+
+    Ok(())
+}
+```
+
 ## 📖 Core Concepts
 
 ### The `Manager`
@@ -155,7 +197,9 @@ This library **does not** include built-in automatic reconnection logic by desig
 
 When the connection is lost, methods like `send_action` will return an `AmiError::ConnectionClosed`, and the event stream will end. Your application should handle these signals by creating a new `Manager` instance and calling `connect_and_login` again.
 
-For a complete and robust example of a web application with resilient reconnection logic, see the [**`examples/actix_web_example.rs`**](https://www.google.com/search?q=examples/actix_web_example.rs) file in this repository.
+For a complete and robust example of a web application with resilient reconnection logic, see the [**`examples/actix_web_example.rs`**](examples/actix_web_example.rs) file in this repository.
+
+For a basic demonstration of the library's features including the new actions and events, see [**`examples/basic_usage.rs`**](examples/basic_usage.rs).
 
 ## 🤝 Contributing
 
