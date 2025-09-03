@@ -147,7 +147,7 @@ fn get_fields_if_action_id_matches<'a>(
 async fn get_calls(data: web::Data<AppState>) -> impl Responder {
     info!("[HTTP] GET /calls - requesting list of active calls");
 
-    if let Err(e) = crate::ensure_manager_connected(&data).await {
+    if let Err(e) = ensure_manager_connected(&data).await {
         return HttpResponse::InternalServerError().body(format!("Error reconnecting: {}", e));
     }
 
