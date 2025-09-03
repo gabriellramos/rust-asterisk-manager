@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-01-24
+
+This release introduces a comprehensive resilient connection module for production-ready, high-availability applications. The new resilient module provides automatic reconnection, heartbeat monitoring, and fault-tolerant event streaming while maintaining full backward compatibility with existing APIs.
+
+### Added
+
+-   **Resilient Connection Module**: New `src/resilient.rs` module with production-ready features for mission-critical applications:
+    -   **Automatic Reconnection**: Seamless reconnection when connections are lost with configurable retry logic
+    -   **Heartbeat Monitoring**: Configurable ping intervals to detect connection issues early and maintain connection health
+    -   **Infinite Event Streams**: Never-ending event streams that handle reconnection transparently using `infinite_events_stream()`
+    -   **Watchdog Functionality**: Monitors authentication status and triggers reconnection when needed
+    -   **Configurable Buffer Sizes**: Optimized memory usage for high-throughput applications via `Manager::new_with_buffer(size)`
+
+-   **New API Functions**:
+    -   `connect_resilient()` function for creating Manager instances with resilient features enabled
+    -   `infinite_events_stream()` for fault-tolerant, never-ending event streaming
+    -   `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
+
+-   **Production-Ready Examples**:
+    -   **Resilient Actix Web Example** (`examples/actix_web_resilient_example.rs`): Demonstrates resilient connections in a real-world web application scenario with automatic reconnection
+    -   **Examples Documentation** (`examples/README.md`): Comprehensive comparison between traditional and resilient approaches
+
+-   **Enhanced Documentation**: Updated README.md with detailed resilient features documentation, usage examples, and feature comparisons
+
+### Fixed
+
+-   Fixed compilation error in `examples/actix_web_example.rs` by removing incorrect `crate::` prefix
+
+### Enhanced
+
+-   **Testing**: Added 20 comprehensive unit tests covering all resilient functionality
+-   **Backward Compatibility**: All existing APIs remain unchanged and fully functional
+
+---
+
 ## [2.0.0] - 2025-06-20
 
 This release introduces a complete architectural overhaul for robust concurrency and adds intelligent features for handling complex AMI actions. It includes breaking changes to the connection API and response structures.
