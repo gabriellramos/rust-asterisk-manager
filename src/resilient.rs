@@ -166,9 +166,13 @@ fn create_infinite_stream(
             
             // Attempt reconnection
             retry_count += 1;
+            
+            // Calculate retry delay with exponential backoff (capped at 30 seconds)
+            let retry_delay = std::cmp::min(1u64 << (retry_count - 1), 30);
+            
             if retry_count > MAX_RETRIES {
-                log::error!("Max reconnection attempts reached, waiting before retry");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                log::error!("Max reconnection attempts reached, waiting {} seconds before retry", retry_delay);
+                tokio::time::sleep(Duration::from_secs(retry_delay)).await;
                 retry_count = 0;
             }
             
@@ -179,8 +183,8 @@ fn create_infinite_stream(
                     retry_count = 0;
                 }
                 Err(e) => {
-                    log::warn!("Reconnection failed: {}, retrying in 1 second", e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    log::warn!("Reconnection failed: {}, retrying in {} seconds", e, retry_delay);
+                    tokio::time::sleep(Duration::from_secs(retry_delay)).await;
                 }
             }
         }
