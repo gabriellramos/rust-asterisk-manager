@@ -423,9 +423,7 @@ impl Manager {
                 use tokio_stream::StreamExt;
                 while let Some(Ok(event)) = stream.next().await {
                     if let AmiEvent::UnknownEvent { event_type, fields } = &event {
-                        if fields.get("ActionID").map(|id| id.as_str())
-                            == Some(&action_id)
-                        {
+                        if fields.get("ActionID").map(|id| id.as_str()) == Some(&action_id) {
                             if event_type.ends_with("Complete") {
                                 break;
                             }
@@ -569,7 +567,11 @@ impl Manager {
         self.start_watchdog_with_interval(options, 1).await
     }
 
-    pub async fn start_watchdog_with_interval(&self, options: ManagerOptions, interval_secs: u64) -> Result<(), AmiError> {
+    pub async fn start_watchdog_with_interval(
+        &self,
+        options: ManagerOptions,
+        interval_secs: u64,
+    ) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
 
         // Cancel existing watchdog if any

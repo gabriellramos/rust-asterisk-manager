@@ -166,7 +166,7 @@ For production applications that require high availability and fault tolerance, 
 Configuration notes:
 
 - `heartbeat_interval` (seconds): controls how often a heartbeat `Ping` is sent when using the `resilient` module. Lower values mean faster failure detection but more AMI traffic.
-- `max_retries`: number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff. Tune this depending on how aggressive you want reconnection attempts to be.
+- `max_retries`: number of immediate reconnection attempts before adding 5-second delays in cycles. The logic works in cycles: first `max_retries` attempts are immediate, then one attempt with a 5-second delay, then the cycle repeats. Tune this depending on how aggressive you want reconnection attempts to be.
 - `metrics`: optional `ResilientMetrics` instance for collecting reconnection statistics (attempts, successes, failures, timing). Set to `Some(ResilientMetrics::new())` to enable metrics collection.
 
 ### Example Usage
@@ -217,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Traditional Approach
 
-The core library **does not** include built-in automatic reconnection logic by design. The philosophy is to provide robust building blocks so you can implement the reconnection strategy that best fits your application (e.g., exponential backoff, fixed number of attempts, etc.).
+The core library **does not** include built-in automatic reconnection logic by design. The philosophy is to provide robust building blocks so you can implement the reconnection strategy that best fits your application (e.g., fixed delays, exponential backoff, fixed number of attempts, etc.).
 
 When the connection is lost, methods like `send_action` will return an `AmiError::ConnectionClosed`, and the event stream will end. Your application should handle these signals by creating a new `Manager` instance and calling `connect_and_login` again.
 

@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to thi- **Adaptive Connection Management**:
+  - Smart retry logic with fixed 5-second delays
+  - Graceful fallback mechanisms and state preservationect will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -20,7 +22,7 @@ This release introduces a comprehensive resilient connection module for producti
   - `watchdog_interval`: Configurable watchdog check interval (default: 1 second)
   - `buffer_size`: Configurable event broadcaster buffer size (default: 2048)
 - **Production-Ready Features**:
-  - Exponential backoff with jitter to prevent thundering herd problems
+  - Fixed 5-second retry delays for predictable reconnection behavior
   - Comprehensive logging with timestamps and attempt tracking
   - Stream instance identification for debugging multi-instance scenarios
   - Global cumulative attempt counter that persists across stream recreations
@@ -53,16 +55,16 @@ This release introduces a comprehensive resilient connection module for producti
 
 -   **ResilientOptions additions**: The `ResilientOptions` struct now exposes additional configuration knobs:
     - `heartbeat_interval` (u64, seconds) — controls how often a heartbeat `Ping` is sent when `enable_heartbeat` is true (default: 30).
-    - `max_retries` (u32) — number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff (default: 3).
+    - `max_retries` (u32) — number of immediate reconnection attempts before adding 5-second delays in cycles (default: 3).
     - `metrics` (Option<ResilientMetrics>) — optional metrics collection for monitoring reconnection behavior (default: None).
 
 -   **Improved reconnection logging**: Enhanced visibility into reconnection attempts with detailed logs including:
-    - Cumulative attempt counters and jitter-adjusted delays
+    - Cumulative attempt counters and fixed 5-second delays
     - Sleep duration tracking to identify timing issues
     - Production-friendly log levels (periodic attempts use DEBUG, failures/successes use INFO/WARN)
     - Timestamps for predicted retry times
 
--   **Jitter in backoff delays**: Added jitter to exponential backoff to prevent thundering herd effects when multiple instances reconnect simultaneously.
+-   **Fixed delay implementation**: Uses fixed 5-second delays for predictable reconnection behavior and simplified troubleshooting.
 
 Upgrade note: If your code constructs `ResilientOptions` manually, add the `max_retries` and `metrics` fields or switch to `ResilientOptions::default()` and adjust fields as needed. The default values preserve the previous behavior (30s heartbeat, 3 retries, no metrics).-   **Production-Ready Examples**:
     -   **Resilient Actix Web Example** (`examples/actix_web_resilient_example.rs`): Demonstrates resilient connections in a real-world web application scenario with automatic reconnection

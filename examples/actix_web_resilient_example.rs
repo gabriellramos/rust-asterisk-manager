@@ -60,8 +60,13 @@ struct CallsResponse {
 
 async fn get_events(data: web::Data<AppState>) -> impl Responder {
     let events = data.events.lock().await;
-    info!("[HTTP] GET /events - returning {} events", events.len());
-    HttpResponse::Ok().json(&*events)
+    let mut events_reversed = events.clone();
+    events_reversed.reverse();
+    info!(
+        "[HTTP] GET /events - returning {} events in reverse order",
+        events_reversed.len()
+    );
+    HttpResponse::Ok().json(events_reversed)
 }
 
 async fn post_action(data: web::Data<AppState>, req: web::Json<ActionRequest>) -> impl Responder {
@@ -155,9 +160,8 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                     if event_type == Some("CoreShowChannel") {
                         if let Ok(value) = serde_json::to_value(fields) {
                             if let Some(uid) = value.get("Uniqueid") {
-                                let is_duplicate = calls.iter().any(|c: &Value| {
-                                    c.get("Uniqueid") == Some(uid)
-                                });
+                                let is_duplicate =
+                                    calls.iter().any(|c: &Value| c.get("Uniqueid") == Some(uid));
 
                                 if !is_duplicate {
                                     calls.push(value);
@@ -195,6 +199,12 @@ async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
     let connection_status = data.connection_status.lock().await;
     let uptime = data.start_time.elapsed();
 
+    // Acquire the events lock once and store the count
+    let events_count = {
+        let events_guard = data.events.lock().await;
+        events_guard.len()
+    }; // Lock is automatically released here
+
     let response = serde_json::json!({
         "resilient_metrics": {
             "reconnection_attempts": metrics.0,
@@ -214,8 +224,8 @@ async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
         },
         "application_metrics": {
             "total_uptime_seconds": uptime.as_secs(),
-            "events_in_buffer": data.events.lock().await.len(),
-            "buffer_utilization_percent": (data.events.lock().await.len() as f64 / MAX_EVENT_BUFFER_SIZE as f64 * 100.0),
+            "events_in_buffer": events_count,
+            "buffer_utilization_percent": (events_count as f64 / MAX_EVENT_BUFFER_SIZE as f64 * 100.0),
         }
     });
 

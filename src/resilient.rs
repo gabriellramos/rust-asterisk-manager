@@ -119,9 +119,9 @@ pub struct ResilientOptions {
     pub heartbeat_interval: u64,
     /// Watchdog check interval in seconds (default: 1)
     pub watchdog_interval: u64,
-    /// Maximum number of immediate reconnection attempts before waiting.
-    /// After exceeding this number the retry counter is reset and the code
-    /// will wait using the exponential backoff delay. Default: 3.
+    /// Maximum number of immediate reconnection attempts before adding delays.
+    /// The logic works in cycles: first `max_retries` attempts are immediate,
+    /// then one attempt with a 5-second delay, then the cycle repeats. Default: 3.
     pub max_retries: u32,
     /// Optional metrics collection for monitoring reconnection behavior
     #[serde(skip)]
@@ -183,7 +183,9 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start watchdog if enabled
     if options.enable_watchdog {
-        manager.start_watchdog_with_interval(options.manager_options, options.watchdog_interval).await?;
+        manager
+            .start_watchdog_with_interval(options.manager_options, options.watchdog_interval)
+            .await?;
     }
 
     Ok(manager)
@@ -253,7 +255,7 @@ fn create_infinite_stream(
                 }
             }
 
-            // Reconnection attempts with infinite retry
+            // Reconnection attempts with max_retries cycles
             'reconnect_loop: loop {
                 // Start timing reconnection attempts
                 let reconnection_start = Instant::now();
@@ -267,16 +269,21 @@ fn create_infinite_stream(
                 retry_count += 1;
                 let cumulative_attempts = cumulative_counter.fetch_add(1, Ordering::SeqCst) + 1;
 
-                // Simple fixed delay - no exponential backoff or jitter
-                let retry_delay = 5; // Fixed 5 second delay
+                // Determine delay based on retry_count and max_retries
+                let retry_delay = if retry_count <= options.max_retries {
+                    0 // Immediate retry for the first max_retries attempts
+                } else {
+                    5 // Fixed 5 second delay after exceeding max_retries
+                };
 
                 // Log attempt info - use DEBUG for library internal logging
                 log::debug!(
-                    "[{}] Reconnection attempt #{}, cumulative #{}, next delay {}s",
+                    "[{}] Reconnection attempt #{}, cumulative #{}, delay {}s (max_retries={})",
                     stream_id,
                     retry_count,
                     cumulative_attempts,
-                    retry_delay
+                    retry_delay,
+                    options.max_retries
                 );
 
                 // Try to reconnect and log result with attempt number
@@ -313,17 +320,30 @@ fn create_infinite_stream(
                             retry_delay
                         );
 
-                        // Sleep before next attempt with visible timing
-                        let sleep_start = std::time::Instant::now();
-                        tokio::time::sleep(Duration::from_secs(retry_delay)).await;
-                        let sleep_duration = sleep_start.elapsed();
-                        log::debug!(
-                            "[{}] Retry delay completed after {:.1}s, starting next attempt...",
-                            stream_id,
-                            sleep_duration.as_secs_f64()
-                        );
+                        // Apply delay if needed
+                        if retry_delay > 0 {
+                            let sleep_start = std::time::Instant::now();
+                            tokio::time::sleep(Duration::from_secs(retry_delay)).await;
+                            let sleep_duration = sleep_start.elapsed();
+                            log::debug!(
+                                "[{}] Retry delay completed after {:.1}s, starting next attempt...",
+                                stream_id,
+                                sleep_duration.as_secs_f64()
+                            );
+                        }
+
+                        // Reset retry_count after going through a full cycle (max_retries immediate + 1 delayed attempt)
+                        if retry_count > options.max_retries {
+                            log::debug!(
+                                "[{}] Completed retry cycle ({} immediate + 1 delayed), resetting counter",
+                                stream_id,
+                                options.max_retries
+                            );
+                            retry_count = 0;
+                        }
+
                         // Continue the reconnection loop (will loop back to retry)
-                        log::trace!("[{}] Continuing reconnection loop for immediate retry", stream_id);
+                        log::trace!("[{}] Continuing reconnection loop for next attempt", stream_id);
                     }
                 }
             } // End of reconnection loop
@@ -384,6 +404,34 @@ mod tests {
         assert_eq!(opts.enable_watchdog, deserialized.enable_watchdog);
         assert_eq!(opts.heartbeat_interval, deserialized.heartbeat_interval);
         assert_eq!(opts.watchdog_interval, deserialized.watchdog_interval);
+    }
+
+    #[test]
+    fn test_max_retries_behavior() {
+        // Test that max_retries is properly included in ResilientOptions
+        let opts = ResilientOptions {
+            manager_options: ManagerOptions {
+                port: 5038,
+                host: "test".to_string(),
+                username: "test".to_string(),
+                password: "test".to_string(),
+                events: true,
+            },
+            buffer_size: 1024,
+            enable_heartbeat: false,
+            enable_watchdog: false,
+            heartbeat_interval: 30,
+            watchdog_interval: 1,
+            max_retries: 5, // Test custom value
+            metrics: None,
+            cumulative_attempts_counter: None,
+        };
+
+        assert_eq!(opts.max_retries, 5);
+
+        // Test that default is 3
+        let default_opts = ResilientOptions::default();
+        assert_eq!(default_opts.max_retries, 3);
     }
 
     #[tokio::test]
