@@ -43,7 +43,7 @@ Add `asterisk-manager` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-asterisk-manager = "2.0.0" # Or the latest version
+asterisk-manager = "2.1.0" # Or the latest version
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 ```
@@ -52,7 +52,7 @@ To enable automatic API documentation support for frameworks like Actix-web or A
 
 ```toml
 [dependencies]
-asterisk-manager = { version = "2.0.0", features = ["docs"] }
+asterisk-manager = { version = "2.1.0", features = ["docs"] }
 ```
 
 ### 2. Usage Example
@@ -128,11 +128,13 @@ while let Some(Ok(event)) = stream.next().await {
 
 ## 📝 API Documentation with Utoipa
 
-This library provides optional support for `utoipa` to automatically generate OpenAPI (Swagger) schemas for your web application.
+This library provides optional support for `utoipa` to automatically generate OpenAPI (Swagger) schemas for your web application. 
+
+This feature is available starting from version `2.0.0`.
 
 To enable it, add the `docs` feature in your `Cargo.toml`:
 ```toml
-asterisk-manager = { version = "2.0.0", features = ["docs"] }
+asterisk-manager = { version = "2.1.0", features = ["docs"] }
 ```
 With this feature enabled, all public types like `AmiResponse` and `AmiEvent` will derive `utoipa::ToSchema`. You can then reference them directly in your Actix-web or Axum controller documentation.
 
