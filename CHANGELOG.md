@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This release introduces a comprehensive resilient connection module for production-ready, high-availability applications. The new resilient module provides automatic reconnection, heartbeat monitoring, and fault-tolerant event streaming while maintaining full backward compatibility with existing APIs.
 
 ### Added
+- **Resilient Connection Module**: Complete solution for production AMI connections
+  - `ResilientOptions` struct with extensive configuration options
+  - `connect_resilient()` function for creating resilient managers
+  - `infinite_events_stream()` for fault-tolerant event streaming
+- **Configurable Parameters**:
+  - `max_retries`: Configurable maximum retry attempts (default: 3)
+  - `heartbeat_interval`: Configurable heartbeat interval in seconds (default: 30)
+  - `watchdog_interval`: Configurable watchdog check interval (default: 1 second)
+  - `buffer_size`: Configurable event broadcaster buffer size (default: 2048)
+- **Production-Ready Features**:
+  - Exponential backoff with jitter to prevent thundering herd problems
+  - Comprehensive logging with timestamps and attempt tracking
+  - Stream instance identification for debugging multi-instance scenarios
+  - Global cumulative attempt counter that persists across stream recreations
+  - Optional metrics collection with `ResilientMetrics` struct
+- **Enhanced Heartbeat System**:
+  - `start_heartbeat_with_interval()` method for custom heartbeat intervals
+  - Backward-compatible `start_heartbeat()` method (uses 30-second default)
+  - Watchdog monitoring for automatic reconnection on heartbeat failures
+- **Advanced Logging**:
+  - Detailed reconnection attempt tracking with timing information
+  - Production-appropriate log levels (DEBUG for periodic events, INFO/WARN for significant events)
+  - Sleep duration verification to identify timing discrepancies
+  - Stream lifecycle tracking with unique instance identifiers
+
+### Added
 
 -   **Resilient Connection Module**: New `src/resilient.rs` module with production-ready features for mission-critical applications:
     -   **Automatic Reconnection**: Seamless reconnection when connections are lost with configurable retry logic
@@ -23,15 +49,22 @@ This release introduces a comprehensive resilient connection module for producti
     -   `infinite_events_stream()` for fault-tolerant, never-ending event streaming
     -   `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
 
-    ### Changed
+### Changed
 
-    -   **ResilientOptions additions**: The `ResilientOptions` struct now exposes two additional configuration knobs:
-        - `heartbeat_interval` (u64, seconds) — controls how often a heartbeat `Ping` is sent when `enable_heartbeat` is true (default: 30).
-        - `max_retries` (u32) — number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff (default: 3).
+-   **ResilientOptions additions**: The `ResilientOptions` struct now exposes additional configuration knobs:
+    - `heartbeat_interval` (u64, seconds) — controls how often a heartbeat `Ping` is sent when `enable_heartbeat` is true (default: 30).
+    - `max_retries` (u32) — number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff (default: 3).
+    - `metrics` (Option<ResilientMetrics>) — optional metrics collection for monitoring reconnection behavior (default: None).
 
-    Upgrade note: If your code constructs `ResilientOptions` manually, add the `max_retries` field or switch to `ResilientOptions::default()` and adjust fields as needed. The default values preserve the previous behavior (30s heartbeat, 3 retries).
+-   **Improved reconnection logging**: Enhanced visibility into reconnection attempts with detailed logs including:
+    - Cumulative attempt counters and jitter-adjusted delays
+    - Sleep duration tracking to identify timing issues
+    - Production-friendly log levels (periodic attempts use DEBUG, failures/successes use INFO/WARN)
+    - Timestamps for predicted retry times
 
--   **Production-Ready Examples**:
+-   **Jitter in backoff delays**: Added jitter to exponential backoff to prevent thundering herd effects when multiple instances reconnect simultaneously.
+
+Upgrade note: If your code constructs `ResilientOptions` manually, add the `max_retries` and `metrics` fields or switch to `ResilientOptions::default()` and adjust fields as needed. The default values preserve the previous behavior (30s heartbeat, 3 retries, no metrics).-   **Production-Ready Examples**:
     -   **Resilient Actix Web Example** (`examples/actix_web_resilient_example.rs`): Demonstrates resilient connections in a real-world web application scenario with automatic reconnection
     -   **Examples Documentation** (`examples/README.md`): Comprehensive comparison between traditional and resilient approaches
 

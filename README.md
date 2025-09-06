@@ -167,6 +167,7 @@ Configuration notes:
 
 - `heartbeat_interval` (seconds): controls how often a heartbeat `Ping` is sent when using the `resilient` module. Lower values mean faster failure detection but more AMI traffic.
 - `max_retries`: number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff. Tune this depending on how aggressive you want reconnection attempts to be.
+- `metrics`: optional `ResilientMetrics` instance for collecting reconnection statistics (attempts, successes, failures, timing). Set to `Some(ResilientMetrics::new())` to enable metrics collection.
 
 ### Example Usage
 

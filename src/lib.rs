@@ -63,6 +63,8 @@
 //!         heartbeat_interval: 30,
 //!         watchdog_interval: 1,
 //!         max_retries: 3,
+//!         metrics: None,
+//!         cumulative_attempts_counter: None,
 //!     };
 //!     
 //!     let manager = connect_resilient(options).await?;
@@ -922,11 +924,11 @@ mod tests {
         // 1. Cria um manager vazio, como no teste anterior.
         let manager = Manager::new();
 
-        // 2. Obtém o stream de eventos ANTES de enviar o evento.
+        // 2. Get the event stream BEFORE sending the event.
         let mut stream = manager.all_events_stream().await;
 
-        // 3. Envia o evento internamente para simular uma desconexão.
-        //    Esta parte volta a funcionar por causa do `pub(crate)`.
+        // 3. Send the event internally to simulate a disconnection.
+        //    This part works again because of `pub(crate)`.
         {
             let inner = manager.inner.lock().await;
             let _ = inner

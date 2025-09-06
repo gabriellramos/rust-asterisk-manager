@@ -26,6 +26,8 @@
 //!         heartbeat_interval: 30,
 //!         watchdog_interval: 1,
 //!         max_retries: 3,
+//!         metrics: None,
+//!         cumulative_attempts_counter: None,
 //!     };
 //!
 //!     // Option 1: Connect with resilient features
@@ -50,9 +52,57 @@
 
 use crate::{AmiError, AmiEvent, Manager, ManagerOptions};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt};
+
+/// Simple metrics for resilient connections (optional instrumentation)
+#[derive(Debug, Clone, Default)]
+pub struct ResilientMetrics {
+    pub reconnection_attempts: Arc<AtomicU64>,
+    pub successful_reconnections: Arc<AtomicU64>,
+    pub failed_reconnections: Arc<AtomicU64>,
+    pub connection_lost_events: Arc<AtomicU64>,
+    pub last_reconnection_duration_ms: Arc<AtomicU64>,
+}
+
+impl ResilientMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_reconnection_attempt(&self) {
+        self.reconnection_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_successful_reconnection(&self, duration: Duration) {
+        self.successful_reconnections
+            .fetch_add(1, Ordering::Relaxed);
+        self.last_reconnection_duration_ms
+            .store(duration.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_failed_reconnection(&self) {
+        self.failed_reconnections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_connection_lost(&self) {
+        self.connection_lost_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get current metrics as a snapshot
+    pub fn snapshot(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.reconnection_attempts.load(Ordering::Relaxed),
+            self.successful_reconnections.load(Ordering::Relaxed),
+            self.failed_reconnections.load(Ordering::Relaxed),
+            self.connection_lost_events.load(Ordering::Relaxed),
+            self.last_reconnection_duration_ms.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Configuration options for resilient AMI connections
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +123,21 @@ pub struct ResilientOptions {
     /// After exceeding this number the retry counter is reset and the code
     /// will wait using the exponential backoff delay. Default: 3.
     pub max_retries: u32,
+    /// Optional metrics collection for monitoring reconnection behavior
+    #[serde(skip)]
+    pub metrics: Option<ResilientMetrics>,
+    /// Global cumulative attempts counter shared across stream instances
+    #[serde(skip)]
+    pub cumulative_attempts_counter: Option<Arc<AtomicU64>>,
+}
+
+impl ResilientOptions {
+    /// Create a new ResilientOptions with a shared global cumulative attempts counter.
+    /// This ensures that cumulative attempt counts persist across stream recreation.
+    pub fn with_global_counter(mut self) -> Self {
+        self.cumulative_attempts_counter = Some(Arc::new(AtomicU64::new(0)));
+        self
+    }
 }
 
 impl Default for ResilientOptions {
@@ -82,7 +147,7 @@ impl Default for ResilientOptions {
                 port: 5038,
                 host: "127.0.0.1".to_string(),
                 username: "admin".to_string(),
-                password: "password".to_string(),
+                password: "admin".to_string(),
                 events: true,
             },
             buffer_size: 2048,
@@ -91,6 +156,8 @@ impl Default for ResilientOptions {
             heartbeat_interval: 30,
             watchdog_interval: 1,
             max_retries: 3,
+            metrics: None,
+            cumulative_attempts_counter: None,
         }
     }
 }
@@ -138,9 +205,17 @@ fn create_infinite_stream(
     options: ResilientOptions,
 ) -> impl Stream<Item = Result<AmiEvent, AmiError>> {
     async_stream::stream! {
+        // Generate a unique ID for this stream instance to track lifecycle
+        let stream_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        log::debug!("Creating new resilient stream instance [{}]", stream_id);
+
         let mut current_manager = manager;
         let mut retry_count = 0;
-    let max_retries = options.max_retries;
+
+        // Use global counter if provided, otherwise create a local one
+        let cumulative_counter = options.cumulative_attempts_counter
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
 
         loop {
             let mut event_stream = current_manager.all_events_stream().await;
@@ -153,6 +228,10 @@ fn create_infinite_stream(
 
                         // Check for internal connection lost events
                         if let AmiEvent::InternalConnectionLost { .. } = &event {
+                            // Record connection lost event in metrics if available
+                            if let Some(ref metrics) = options.metrics {
+                                metrics.record_connection_lost();
+                            }
                             // Connection lost, break to outer loop to reconnect
                             yield Ok(event);
                             break;
@@ -161,44 +240,95 @@ fn create_infinite_stream(
                         }
                     }
                     Some(Err(BroadcastStreamRecvError::Lagged(count))) => {
-                        log::warn!("Event stream lagged by {} events, resubscribing", count);
+                        log::debug!("Event stream lagged by {} events, resubscribing", count);
                         // Stream lagged, resubscribe to get a fresh receiver
                         event_stream = current_manager.all_events_stream().await;
                         continue;
                     }
                     None => {
                         // Stream ended, try to reconnect
-                        log::info!("Event stream ended, attempting reconnection");
+                        log::debug!("Event stream ended, attempting reconnection");
                         break;
                     }
                 }
             }
 
-            // Attempt reconnection
-            retry_count += 1;
+            // Reconnection attempts with infinite retry
+            'reconnect_loop: loop {
+                // Start timing reconnection attempts
+                let reconnection_start = Instant::now();
 
-            // Calculate retry delay with exponential backoff (capped at 30 seconds)
-            let retry_delay = std::cmp::min(1u64 << (retry_count - 1), 30);
-
-            if retry_count > max_retries {
-                log::error!("Max reconnection attempts reached, waiting {} seconds before retry", retry_delay);
-                tokio::time::sleep(Duration::from_secs(retry_delay)).await;
-                retry_count = 0;
-            }
-
-            match connect_resilient(options.clone()).await {
-                Ok(new_manager) => {
-                    log::info!("Successfully reconnected to AMI");
-                    current_manager = new_manager;
-                    retry_count = 0;
+                // Record attempt in metrics if available
+                if let Some(ref metrics) = options.metrics {
+                    metrics.record_reconnection_attempt();
                 }
-                Err(e) => {
-                    log::warn!("Reconnection failed: {}, retrying in {} seconds", e, retry_delay);
-                    tokio::time::sleep(Duration::from_secs(retry_delay)).await;
+
+                // Attempt reconnection
+                retry_count += 1;
+                let cumulative_attempts = cumulative_counter.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Simple fixed delay - no exponential backoff or jitter
+                let retry_delay = 5; // Fixed 5 second delay
+
+                // Log attempt info - use DEBUG for library internal logging
+                log::debug!(
+                    "[{}] Reconnection attempt #{}, cumulative #{}, next delay {}s",
+                    stream_id,
+                    retry_count,
+                    cumulative_attempts,
+                    retry_delay
+                );
+
+                // Try to reconnect and log result with attempt number
+                log::debug!("[{}] Attempting to reconnect now (attempt #{}, cumulative #{})", stream_id, retry_count, cumulative_attempts);
+                match connect_resilient(options.clone()).await {
+                    Ok(new_manager) => {
+                        let reconnection_duration = reconnection_start.elapsed();
+                        // Record successful reconnection in metrics
+                        if let Some(ref metrics) = options.metrics {
+                            metrics.record_successful_reconnection(reconnection_duration);
+                        }
+                        log::debug!(
+                            "[{}] Successfully reconnected to AMI on attempt #{}, cumulative #{} (total time since first failure: {:.1}s)",
+                            stream_id,
+                            retry_count,
+                            cumulative_attempts,
+                            reconnection_duration.as_secs_f64()
+                        );
+                        current_manager = new_manager;
+                        retry_count = 0;
+                        // Note: we don't reset cumulative_attempts here to track total attempts across all failures
+                        break 'reconnect_loop; // Exit reconnection loop, go back to event streaming
+                    }
+                    Err(e) => {
+                        // Record failed reconnection in metrics
+                        if let Some(ref metrics) = options.metrics {
+                            metrics.record_failed_reconnection();
+                        }
+                        log::debug!(
+                            "[{}] Reconnection attempt #{} failed: {}, retrying in {} seconds",
+                            stream_id,
+                            retry_count,
+                            e,
+                            retry_delay
+                        );
+
+                        // Sleep before next attempt with visible timing
+                        let sleep_start = std::time::Instant::now();
+                        tokio::time::sleep(Duration::from_secs(retry_delay)).await;
+                        let sleep_duration = sleep_start.elapsed();
+                        log::debug!(
+                            "[{}] Retry delay completed after {:.1}s, starting next attempt...",
+                            stream_id,
+                            sleep_duration.as_secs_f64()
+                        );
+                        // Continue the reconnection loop (will loop back to retry)
+                        log::trace!("[{}] Continuing reconnection loop for immediate retry", stream_id);
+                    }
                 }
-            }
-        }
-    }
+            } // End of reconnection loop
+        } // End of main event loop
+    } // End of async_stream::stream!
 }
 
 #[cfg(test)]
@@ -231,6 +361,8 @@ mod tests {
             heartbeat_interval: 60,
             watchdog_interval: 2,
             max_retries: 3,
+            metrics: None,
+            cumulative_attempts_counter: None,
         };
         let opts2 = opts.clone();
         assert_eq!(opts.buffer_size, opts2.buffer_size);
@@ -271,6 +403,8 @@ mod tests {
             heartbeat_interval: 30,
             watchdog_interval: 1,
             max_retries: 3,
+            metrics: None,
+            cumulative_attempts_counter: None,
         };
 
         // Should fail to connect
@@ -295,6 +429,8 @@ mod tests {
             heartbeat_interval: 30,
             watchdog_interval: 1,
             max_retries: 3,
+            metrics: None,
+            cumulative_attempts_counter: None,
         };
 
         // Should fail to create due to connection failure

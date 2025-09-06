@@ -1,15 +1,18 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use asterisk_manager::resilient::{connect_resilient, infinite_events_stream, ResilientOptions};
+use asterisk_manager::resilient::{
+    connect_resilient, infinite_events_stream, ResilientMetrics, ResilientOptions,
+};
 use asterisk_manager::{AmiAction, AmiEvent, AmiResponse, Manager, ManagerOptions};
 use chrono::Local;
 use env_logger::{Builder, Env};
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -19,6 +22,21 @@ const MAX_EVENT_BUFFER_SIZE: usize = 1000;
 struct AppState {
     manager: Arc<Mutex<Manager>>,
     events: Arc<Mutex<Vec<AmiEvent>>>,
+    // Resilient connection metrics for monitoring
+    metrics: Arc<ResilientMetrics>,
+    // Application-level metrics
+    connection_status: Arc<Mutex<ConnectionStatus>>,
+    start_time: Instant,
+}
+
+/// Connection status tracking for the application
+#[derive(Debug, Clone)]
+struct ConnectionStatus {
+    is_connected: bool,
+    last_connection_attempt: Option<Instant>,
+    last_successful_connection: Option<Instant>,
+    total_uptime: Duration,
+    total_downtime: Duration,
 }
 
 #[derive(Deserialize)]
@@ -172,6 +190,60 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(CallsResponse { calls })
 }
 
+/// Get detailed metrics about the resilient connection
+async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
+    let metrics = data.metrics.snapshot();
+    let connection_status = data.connection_status.lock().await;
+    let uptime = data.start_time.elapsed();
+
+    let response = serde_json::json!({
+        "resilient_metrics": {
+            "reconnection_attempts": metrics.0,
+            "successful_reconnections": metrics.1,
+            "failed_reconnections": metrics.2,
+            "connection_lost_events": metrics.3,
+            "last_reconnection_duration_ms": metrics.4,
+        },
+        "connection_status": {
+            "is_connected": connection_status.is_connected,
+            "last_connection_attempt": connection_status.last_connection_attempt
+                .map(|t| t.elapsed().as_secs()),
+            "last_successful_connection": connection_status.last_successful_connection
+                .map(|t| t.elapsed().as_secs()),
+            "total_uptime_seconds": connection_status.total_uptime.as_secs(),
+            "total_downtime_seconds": connection_status.total_downtime.as_secs(),
+        },
+        "application_metrics": {
+            "total_uptime_seconds": uptime.as_secs(),
+            "events_in_buffer": data.events.lock().await.len(),
+            "buffer_utilization_percent": (data.events.lock().await.len() as f64 / MAX_EVENT_BUFFER_SIZE as f64 * 100.0),
+        }
+    });
+
+    info!("[HTTP] GET /metrics - returning connection and resilience metrics");
+    HttpResponse::Ok().json(response)
+}
+
+/// Get connection health check
+async fn health_check(data: web::Data<AppState>) -> impl Responder {
+    let connection_status = data.connection_status.lock().await;
+    let metrics = data.metrics.snapshot();
+
+    let is_healthy = connection_status.is_connected && (metrics.3 == 0 || metrics.1 > 0); // No connection losses or successful reconnections
+
+    let status_code = if is_healthy { 200 } else { 503 };
+    let status = if is_healthy { "healthy" } else { "degraded" };
+
+    let response = serde_json::json!({
+        "status": status,
+        "is_connected": connection_status.is_connected,
+        "reconnection_attempts": metrics.0,
+        "connection_lost_events": metrics.3,
+    });
+
+    HttpResponse::build(actix_web::http::StatusCode::from_u16(status_code).unwrap()).json(response)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -190,7 +262,10 @@ async fn main() -> std::io::Result<()> {
         })
         .init();
 
-    // Configure resilient AMI connection options
+    // Configure resilient AMI connection options with full monitoring capabilities
+    let metrics = Arc::new(ResilientMetrics::new());
+    let global_counter = Arc::new(AtomicU64::new(0));
+
     let resilient_options = ResilientOptions {
         manager_options: ManagerOptions {
             port: std::env::var("AMI_PORT")
@@ -202,12 +277,17 @@ async fn main() -> std::io::Result<()> {
             password: std::env::var("AMI_PASSWORD").unwrap_or_else(|_| "password".to_string()),
             events: true,
         },
-        buffer_size: 2048,
+        buffer_size: 4096, // Larger buffer for high-traffic scenarios
         enable_heartbeat: true,
         enable_watchdog: true,
-        heartbeat_interval: 30,
+        heartbeat_interval: std::env::var("AMI_HEARTBEAT_INTERVAL")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30),
         watchdog_interval: 1,
-        max_retries: 10,
+        max_retries: 10, // Higher retry count for production resilience
+        metrics: Some((*metrics).clone()),
+        cumulative_attempts_counter: Some(global_counter.clone()),
     };
 
     // Connect using resilient connection - automatic reconnection handled internally
@@ -232,17 +312,27 @@ async fn main() -> std::io::Result<()> {
     let app_state = AppState {
         manager: Arc::new(Mutex::new(manager)),
         events: Arc::new(Mutex::new(Vec::new())),
+        metrics: metrics.clone(),
+        connection_status: Arc::new(Mutex::new(ConnectionStatus {
+            is_connected: true,
+            last_connection_attempt: Some(Instant::now()),
+            last_successful_connection: Some(Instant::now()),
+            total_uptime: Duration::from_secs(0),
+            total_downtime: Duration::from_secs(0),
+        })),
+        start_time: Instant::now(),
     };
 
     //==================================================================================//
-    // EVENT COLLECTION TASK - USING RESILIENT INFINITE STREAM
+    // EVENT COLLECTION TASK - USING RESILIENT INFINITE STREAM WITH FULL MONITORING
     //==================================================================================//
     let app_state_for_task = app_state.clone();
+    let resilient_options_for_task = resilient_options.clone();
     tokio::spawn(async move {
-        info!("[EVENT_TASK] Starting resilient event collection...");
+        info!("[EVENT_TASK] Starting resilient event collection with full monitoring...");
 
         // Create infinite event stream that handles all reconnection automatically
-        let event_stream = match infinite_events_stream(resilient_options).await {
+        let event_stream = match infinite_events_stream(resilient_options_for_task).await {
             Ok(stream) => stream,
             Err(e) => {
                 error!("[EVENT_TASK] Failed to create infinite event stream: {}", e);
@@ -252,12 +342,44 @@ async fn main() -> std::io::Result<()> {
 
         tokio::pin!(event_stream);
 
-        info!("[EVENT_TASK] Connected to infinite event stream with automatic reconnection");
+        info!("[EVENT_TASK] Connected to infinite event stream with automatic reconnection and metrics");
+
+        let mut last_connection_check = Instant::now();
+        let mut was_connected = true;
+        let mut downtime_start: Option<Instant> = None;
 
         // This stream never ends and handles all reconnection logic internally
         while let Some(event_result) = event_stream.next().await {
             match event_result {
                 Ok(event) => {
+                    // Monitor connection status based on events
+                    match &event {
+                        AmiEvent::InternalConnectionLost { .. } => {
+                            warn!("[EVENT_TASK] Connection lost detected - updating status");
+                            let mut status = app_state_for_task.connection_status.lock().await;
+                            status.is_connected = false;
+                            status.last_connection_attempt = Some(Instant::now());
+                            if was_connected {
+                                downtime_start = Some(Instant::now());
+                                was_connected = false;
+                            }
+                        }
+                        _ => {
+                            // Any other event means we're connected
+                            if !was_connected {
+                                info!("[EVENT_TASK] Connection restored - updating status");
+                                let mut status = app_state_for_task.connection_status.lock().await;
+                                status.is_connected = true;
+                                status.last_successful_connection = Some(Instant::now());
+                                if let Some(start) = downtime_start {
+                                    status.total_downtime += start.elapsed();
+                                    downtime_start = None;
+                                }
+                                was_connected = true;
+                            }
+                        }
+                    }
+
                     info!("[AMI_EVENT] Received: {:?}", event);
                     let mut evs = app_state_for_task.events.lock().await;
                     evs.push(event);
@@ -270,6 +392,16 @@ async fn main() -> std::io::Result<()> {
                             amount_to_drain
                         );
                         evs.drain(0..amount_to_drain);
+                    }
+
+                    // Periodic connection status logging
+                    if last_connection_check.elapsed() > Duration::from_secs(60) {
+                        let metrics = app_state_for_task.metrics.snapshot();
+                        info!(
+                            "[EVENT_TASK] Periodic status - Reconnections: {}, Lost: {}, Buffer: {}/{}",
+                            metrics.1, metrics.3, len, MAX_EVENT_BUFFER_SIZE
+                        );
+                        last_connection_check = Instant::now();
                     }
                 }
                 Err(e) => {
@@ -287,7 +419,26 @@ async fn main() -> std::io::Result<()> {
     });
 
     info!("Actix Web server with resilient AMI connections running at http://0.0.0.0:8080");
-    info!("Features enabled: automatic reconnection, heartbeat monitoring, connection watchdog");
+    info!("Features enabled: automatic reconnection, heartbeat monitoring, connection watchdog, metrics collection");
+    info!("Available endpoints:");
+    info!("  GET  /events  - Get recent AMI events");
+    info!("  POST /action  - Send AMI action");
+    info!("  GET  /calls   - Get active calls");
+    info!("  GET  /metrics - Get resilient connection metrics");
+    info!("  GET  /health  - Health check endpoint");
+    info!("Environment variables:");
+    info!(
+        "  AMI_HOST={}",
+        std::env::var("AMI_HOST").unwrap_or_else(|_| "localhost".to_string())
+    );
+    info!(
+        "  AMI_PORT={}",
+        std::env::var("AMI_PORT").unwrap_or_else(|_| "5038".to_string())
+    );
+    info!(
+        "  AMI_HEARTBEAT_INTERVAL={}",
+        std::env::var("AMI_HEARTBEAT_INTERVAL").unwrap_or_else(|_| "30".to_string())
+    );
 
     HttpServer::new(move || {
         App::new()
@@ -295,6 +446,8 @@ async fn main() -> std::io::Result<()> {
             .route("/events", web::get().to(get_events))
             .route("/action", web::post().to(post_action))
             .route("/calls", web::get().to(get_calls))
+            .route("/metrics", web::get().to(get_metrics))
+            .route("/health", web::get().to(health_check))
     })
     .bind(("0.0.0.0", 8080))?
     .run()
