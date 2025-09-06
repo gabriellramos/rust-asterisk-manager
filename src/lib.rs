@@ -79,8 +79,8 @@
 //! - Support for common events (`Newchannel`, `Hangup`, `PeerStatus`) and fallback for unknown events.
 //! - Detailed error handling via the `AmiError` enum.
 //! - Configurable buffer sizes for high-throughput applications.
-//! - Heartbeat monitoring with automatic disconnection on failure.
-//! - Watchdog for automatic reconnection when not authenticated.
+//! - Heartbeat monitoring with configurable interval and automatic disconnection on failure.
+//! - Watchdog for automatic reconnection with configurable check interval when not authenticated.
 //! - Infinite event streams that handle lag and reconnection automatically.
 //!
 //! ## Requirements
@@ -423,7 +423,7 @@ impl Manager {
                 use tokio_stream::StreamExt;
                 while let Some(Ok(event)) = stream.next().await {
                     if let AmiEvent::UnknownEvent { event_type, fields } = &event {
-                        if fields.get("ActionID").and_then(|id| Some(id.as_str()))
+                        if fields.get("ActionID").map(|id| id.as_str())
                             == Some(&action_id)
                         {
                             if event_type.ends_with("Complete") {
@@ -449,7 +449,7 @@ impl Manager {
             Ok(AmiResponse {
                 response: initial_response.response,
                 action_id: initial_response.action_id,
-                message: Some(format!("Successfully collected events.")),
+                message: Some("Successfully collected events.".to_string()),
                 fields: final_fields,
             })
         } else {
@@ -566,6 +566,10 @@ impl Manager {
     }
 
     pub async fn start_watchdog(&self, options: ManagerOptions) -> Result<(), AmiError> {
+        self.start_watchdog_with_interval(options, 1).await
+    }
+
+    pub async fn start_watchdog_with_interval(&self, options: ManagerOptions, interval_secs: u64) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
 
         // Cancel existing watchdog if any
@@ -578,7 +582,7 @@ impl Manager {
 
         let manager = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
@@ -1065,6 +1069,37 @@ mod tests {
         {
             let inner = manager.inner.lock().await;
             assert!(inner.heartbeat_token.is_some());
+        }
+
+        // Clean up
+        let _ = manager.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_interval_configuration() {
+        // Test that watchdog can be started with different intervals
+        let manager = Manager::new();
+
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "127.0.0.1".to_string(),
+            username: "test".to_string(),
+            password: "test".to_string(),
+            events: true,
+        };
+
+        // Test default interval (backward compatibility)
+        let _ = manager.start_watchdog(opts.clone()).await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.watchdog_token.is_some());
+        }
+
+        // Test custom interval
+        let _ = manager.start_watchdog_with_interval(opts.clone(), 5).await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.watchdog_token.is_some());
         }
 
         // Clean up

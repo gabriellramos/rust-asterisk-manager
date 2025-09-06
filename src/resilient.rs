@@ -183,7 +183,7 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start watchdog if enabled
     if options.enable_watchdog {
-        manager.start_watchdog(options.manager_options).await?;
+        manager.start_watchdog_with_interval(options.manager_options, options.watchdog_interval).await?;
     }
 
     Ok(manager)

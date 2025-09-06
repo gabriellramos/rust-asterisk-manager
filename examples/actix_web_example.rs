@@ -128,7 +128,7 @@ fn get_fields_if_action_id_matches<'a>(
     if let AmiEvent::UnknownEvent { fields, .. } = event {
         if fields
             .get("ActionID")
-            .map_or(false, |id| id == expected_action_id)
+            .is_some_and(|id| id == expected_action_id)
         {
             return Some(fields);
         }
@@ -193,8 +193,7 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                         if let Ok(value) = serde_json::to_value(fields) {
                             if let Some(uid) = value.get("Uniqueid") {
                                 let is_duplicate = calls.iter().any(|c: &Value| {
-                                    c.get("Uniqueid")
-                                        .map_or(false, |existing_uid| existing_uid == uid)
+                                    c.get("Uniqueid") == Some(uid)
                                 });
 
                                 if !is_duplicate {
