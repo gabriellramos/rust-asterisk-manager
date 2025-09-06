@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use asterisk_manager::resilient::{connect_resilient, infinite_events_stream, ResilientOptions};
 use asterisk_manager::{AmiAction, AmiEvent, AmiResponse, Manager, ManagerOptions};
-use asterisk_manager::resilient::{ResilientOptions, connect_resilient, infinite_events_stream};
 use chrono::Local;
 use env_logger::{Builder, Env};
 use log::{error, info};
@@ -207,6 +207,7 @@ async fn main() -> std::io::Result<()> {
         enable_watchdog: true,
         heartbeat_interval: 30,
         watchdog_interval: 1,
+        max_retries: 10,
     };
 
     // Connect using resilient connection - automatic reconnection handled internally
@@ -273,7 +274,10 @@ async fn main() -> std::io::Result<()> {
                 }
                 Err(e) => {
                     // The resilient stream handles reconnection, so errors here are just logged
-                    error!("[EVENT_TASK] Error in event stream (will auto-recover): {:?}", e);
+                    error!(
+                        "[EVENT_TASK] Error in event stream (will auto-recover): {:?}",
+                        e
+                    );
                 }
             }
         }
@@ -284,7 +288,7 @@ async fn main() -> std::io::Result<()> {
 
     info!("Actix Web server with resilient AMI connections running at http://0.0.0.0:8080");
     info!("Features enabled: automatic reconnection, heartbeat monitoring, connection watchdog");
-    
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))

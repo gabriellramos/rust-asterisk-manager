@@ -1,15 +1,15 @@
 //! Resilient AMI connection module
-//! 
+//!
 //! This module provides resilient connection management for Asterisk AMI,
 //! including automatic reconnection, heartbeat monitoring, and infinite event streams.
-//! 
+//!
 //! # Example Usage
-//! 
+//!
 //! ```rust,no_run
 //! use asterisk_manager::resilient::{ResilientOptions, connect_resilient, infinite_events_stream};
 //! use asterisk_manager::ManagerOptions;
 //! use tokio_stream::StreamExt;
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let resilient_options = ResilientOptions {
@@ -25,8 +25,9 @@
 //!         enable_watchdog: true,
 //!         heartbeat_interval: 30,
 //!         watchdog_interval: 1,
+//!         max_retries: 3,
 //!     };
-//! 
+//!
 //!     // Option 1: Connect with resilient features
 //!     let manager = connect_resilient(resilient_options.clone()).await?;
 //!     
@@ -47,11 +48,11 @@
 //! }
 //! ```
 
-use crate::{Manager, ManagerOptions, AmiEvent, AmiError};
+use crate::{AmiError, AmiEvent, Manager, ManagerOptions};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio_stream::{Stream, StreamExt};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::{Stream, StreamExt};
 
 /// Configuration options for resilient AMI connections
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +69,10 @@ pub struct ResilientOptions {
     pub heartbeat_interval: u64,
     /// Watchdog check interval in seconds (default: 1)
     pub watchdog_interval: u64,
+    /// Maximum number of immediate reconnection attempts before waiting.
+    /// After exceeding this number the retry counter is reset and the code
+    /// will wait using the exponential backoff delay. Default: 3.
+    pub max_retries: u32,
 }
 
 impl Default for ResilientOptions {
@@ -85,36 +90,41 @@ impl Default for ResilientOptions {
             enable_watchdog: true,
             heartbeat_interval: 30,
             watchdog_interval: 1,
+            max_retries: 3,
         }
     }
 }
 
 /// Connect a manager with resilient features enabled
-/// 
+///
 /// This function creates a Manager instance with the specified buffer size,
 /// connects it, and optionally starts heartbeat and watchdog monitoring.
 pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, AmiError> {
     let mut manager = Manager::new_with_buffer(options.buffer_size);
-    
+
     // Connect and login
-    manager.connect_and_login(options.manager_options.clone()).await?;
-    
+    manager
+        .connect_and_login(options.manager_options.clone())
+        .await?;
+
     // Start heartbeat if enabled
     if options.enable_heartbeat {
-        manager.start_heartbeat().await?;
+        manager
+            .start_heartbeat_with_interval(options.heartbeat_interval)
+            .await?;
     }
-    
-    // Start watchdog if enabled  
+
+    // Start watchdog if enabled
     if options.enable_watchdog {
         manager.start_watchdog(options.manager_options).await?;
     }
-    
+
     Ok(manager)
 }
 
 /// Create an infinite events stream that automatically handles reconnection and lag
-/// 
-/// This stream never ends on its own and will attempt to resubscribe to the 
+///
+/// This stream never ends on its own and will attempt to resubscribe to the
 /// broadcast channel on lag errors and recreate the stream on connection losses.
 pub async fn infinite_events_stream(
     options: ResilientOptions,
@@ -130,17 +140,17 @@ fn create_infinite_stream(
     async_stream::stream! {
         let mut current_manager = manager;
         let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 3;
-        
+    let max_retries = options.max_retries;
+
         loop {
             let mut event_stream = current_manager.all_events_stream().await;
-            
+
             loop {
                 match event_stream.next().await {
                     Some(Ok(event)) => {
                         // Reset retry count on successful event
                         retry_count = 0;
-                        
+
                         // Check for internal connection lost events
                         if let AmiEvent::InternalConnectionLost { .. } = &event {
                             // Connection lost, break to outer loop to reconnect
@@ -163,19 +173,19 @@ fn create_infinite_stream(
                     }
                 }
             }
-            
+
             // Attempt reconnection
             retry_count += 1;
-            
+
             // Calculate retry delay with exponential backoff (capped at 30 seconds)
             let retry_delay = std::cmp::min(1u64 << (retry_count - 1), 30);
-            
-            if retry_count > MAX_RETRIES {
+
+            if retry_count > max_retries {
                 log::error!("Max reconnection attempts reached, waiting {} seconds before retry", retry_delay);
                 tokio::time::sleep(Duration::from_secs(retry_delay)).await;
                 retry_count = 0;
             }
-            
+
             match connect_resilient(options.clone()).await {
                 Ok(new_manager) => {
                     log::info!("Successfully reconnected to AMI");
@@ -220,6 +230,7 @@ mod tests {
             enable_watchdog: false,
             heartbeat_interval: 60,
             watchdog_interval: 2,
+            max_retries: 3,
         };
         let opts2 = opts.clone();
         assert_eq!(opts.buffer_size, opts2.buffer_size);
@@ -230,11 +241,12 @@ mod tests {
     #[test]
     fn test_resilient_options_serialization() {
         let opts = ResilientOptions::default();
-        
+
         // Test that it can be serialized and deserialized
         let json = serde_json::to_string(&opts).expect("Failed to serialize");
-        let deserialized: ResilientOptions = serde_json::from_str(&json).expect("Failed to deserialize");
-        
+        let deserialized: ResilientOptions =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
         assert_eq!(opts.buffer_size, deserialized.buffer_size);
         assert_eq!(opts.enable_heartbeat, deserialized.enable_heartbeat);
         assert_eq!(opts.enable_watchdog, deserialized.enable_watchdog);
@@ -258,8 +270,9 @@ mod tests {
             enable_watchdog: false,  // Disable to avoid watchdog reconnection
             heartbeat_interval: 30,
             watchdog_interval: 1,
+            max_retries: 3,
         };
-        
+
         // Should fail to connect
         let result = connect_resilient(opts).await;
         assert!(result.is_err());
@@ -281,8 +294,9 @@ mod tests {
             enable_watchdog: false,
             heartbeat_interval: 30,
             watchdog_interval: 1,
+            max_retries: 3,
         };
-        
+
         // Should fail to create due to connection failure
         let result = infinite_events_stream(opts).await;
         assert!(result.is_err());

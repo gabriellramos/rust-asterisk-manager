@@ -23,6 +23,14 @@ This release introduces a comprehensive resilient connection module for producti
     -   `infinite_events_stream()` for fault-tolerant, never-ending event streaming
     -   `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
 
+    ### Changed
+
+    -   **ResilientOptions additions**: The `ResilientOptions` struct now exposes two additional configuration knobs:
+        - `heartbeat_interval` (u64, seconds) — controls how often a heartbeat `Ping` is sent when `enable_heartbeat` is true (default: 30).
+        - `max_retries` (u32) — number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff (default: 3).
+
+    Upgrade note: If your code constructs `ResilientOptions` manually, add the `max_retries` field or switch to `ResilientOptions::default()` and adjust fields as needed. The default values preserve the previous behavior (30s heartbeat, 3 retries).
+
 -   **Production-Ready Examples**:
     -   **Resilient Actix Web Example** (`examples/actix_web_resilient_example.rs`): Demonstrates resilient connections in a real-world web application scenario with automatic reconnection
     -   **Examples Documentation** (`examples/README.md`): Comprehensive comparison between traditional and resilient approaches

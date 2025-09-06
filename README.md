@@ -163,6 +163,11 @@ For production applications that require high availability and fault tolerance, 
 - **Configurable Buffer Sizes**: Optimize memory usage for high-throughput applications
 - **Watchdog Functionality**: Monitors authentication status and triggers reconnection
 
+Configuration notes:
+
+- `heartbeat_interval` (seconds): controls how often a heartbeat `Ping` is sent when using the `resilient` module. Lower values mean faster failure detection but more AMI traffic.
+- `max_retries`: number of immediate reconnection attempts before the reconnect logic resets the counter and waits using exponential backoff. Tune this depending on how aggressive you want reconnection attempts to be.
+
 ### Example Usage
 
 ```rust,no_run
@@ -185,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_watchdog: true,
         heartbeat_interval: 30,
         watchdog_interval: 1,
+    max_retries: 3,
     };
 
     // Option 1: Connect with resilient features
