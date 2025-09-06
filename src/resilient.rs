@@ -58,6 +58,9 @@ use std::time::{Duration, Instant};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt};
 
+/// Fixed delay in seconds between reconnection attempts after exceeding max_retries
+const RECONNECTION_DELAY_SECONDS: u64 = 5;
+
 /// Simple metrics for resilient connections (optional instrumentation)
 #[derive(Debug, Clone, Default)]
 pub struct ResilientMetrics {
@@ -120,8 +123,9 @@ pub struct ResilientOptions {
     /// Watchdog check interval in seconds (default: 1)
     pub watchdog_interval: u64,
     /// Maximum number of immediate reconnection attempts before adding delays.
-    /// The logic works in cycles: first `max_retries` attempts are immediate,
-    /// then one attempt with a 5-second delay, then the cycle repeats. Default: 3.
+    /// Retry behavior: first `max_retries` attempts are immediate (no delay),
+    /// followed by one delayed attempt, then the counter resets and the cycle repeats.
+    /// Default: 3.
     pub max_retries: u32,
     /// Optional metrics collection for monitoring reconnection behavior
     #[serde(skip)]
@@ -193,8 +197,9 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
 /// Create an infinite events stream that automatically handles reconnection and lag
 ///
-/// This stream never ends on its own and will attempt to resubscribe to the
-/// broadcast channel on lag errors and recreate the stream on connection losses.
+/// Once successfully created, this stream never ends on its own and will attempt to
+/// resubscribe to the broadcast channel on lag errors and recreate the stream on connection losses.
+/// However, if the initial connection fails, the stream will not be created and an error will be returned.
 pub async fn infinite_events_stream(
     options: ResilientOptions,
 ) -> Result<impl Stream<Item = Result<AmiEvent, AmiError>>, AmiError> {
@@ -273,7 +278,7 @@ fn create_infinite_stream(
                 let retry_delay = if retry_count <= options.max_retries {
                     0 // Immediate retry for the first max_retries attempts
                 } else {
-                    5 // Fixed 5 second delay after exceeding max_retries
+                    RECONNECTION_DELAY_SECONDS // Fixed delay after exceeding max_retries
                 };
 
                 // Log attempt info - use DEBUG for library internal logging

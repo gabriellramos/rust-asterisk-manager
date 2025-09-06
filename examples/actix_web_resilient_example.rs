@@ -195,7 +195,13 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
 
 /// Get detailed metrics about the resilient connection
 async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
-    let metrics = data.metrics.snapshot();
+    let (
+        reconnection_attempts,
+        successful_reconnections,
+        failed_reconnections,
+        connection_lost_events,
+        last_reconnection_duration_ms,
+    ) = data.metrics.snapshot();
     let connection_status = data.connection_status.lock().await;
     let uptime = data.start_time.elapsed();
 
@@ -207,11 +213,11 @@ async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
 
     let response = serde_json::json!({
         "resilient_metrics": {
-            "reconnection_attempts": metrics.0,
-            "successful_reconnections": metrics.1,
-            "failed_reconnections": metrics.2,
-            "connection_lost_events": metrics.3,
-            "last_reconnection_duration_ms": metrics.4,
+            "reconnection_attempts": reconnection_attempts,
+            "successful_reconnections": successful_reconnections,
+            "failed_reconnections": failed_reconnections,
+            "connection_lost_events": connection_lost_events,
+            "last_reconnection_duration_ms": last_reconnection_duration_ms,
         },
         "connection_status": {
             "is_connected": connection_status.is_connected,
@@ -236,9 +242,16 @@ async fn get_metrics(data: web::Data<AppState>) -> impl Responder {
 /// Get connection health check
 async fn health_check(data: web::Data<AppState>) -> impl Responder {
     let connection_status = data.connection_status.lock().await;
-    let metrics = data.metrics.snapshot();
+    let (
+        reconnection_attempts,
+        successful_reconnections,
+        _failed_reconnections,
+        connection_lost_events,
+        _last_reconnection_duration_ms,
+    ) = data.metrics.snapshot();
 
-    let is_healthy = connection_status.is_connected && (metrics.3 == 0 || metrics.1 > 0); // No connection losses or successful reconnections
+    let is_healthy = connection_status.is_connected
+        && (connection_lost_events == 0 || successful_reconnections > 0); // No connection losses or successful reconnections
 
     let status_code = if is_healthy { 200 } else { 503 };
     let status = if is_healthy { "healthy" } else { "degraded" };
@@ -246,8 +259,8 @@ async fn health_check(data: web::Data<AppState>) -> impl Responder {
     let response = serde_json::json!({
         "status": status,
         "is_connected": connection_status.is_connected,
-        "reconnection_attempts": metrics.0,
-        "connection_lost_events": metrics.3,
+        "reconnection_attempts": reconnection_attempts,
+        "connection_lost_events": connection_lost_events,
     });
 
     HttpResponse::build(actix_web::http::StatusCode::from_u16(status_code).unwrap()).json(response)
@@ -405,10 +418,16 @@ async fn main() -> std::io::Result<()> {
 
                     // Periodic connection status logging
                     if last_connection_check.elapsed() > Duration::from_secs(60) {
-                        let metrics = app_state_for_task.metrics.snapshot();
+                        let (
+                            _reconnection_attempts,
+                            successful_reconnections,
+                            _failed_reconnections,
+                            connection_lost_events,
+                            _last_reconnection_duration_ms,
+                        ) = app_state_for_task.metrics.snapshot();
                         info!(
                             "[EVENT_TASK] Periodic status - Reconnections: {}, Lost: {}, Buffer: {}/{}",
-                            metrics.1, metrics.3, len, MAX_EVENT_BUFFER_SIZE
+                            successful_reconnections, connection_lost_events, len, MAX_EVENT_BUFFER_SIZE
                         );
                         last_connection_check = Instant::now();
                     }
