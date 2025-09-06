@@ -5,49 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] - 2025-01-24
+## [2.1.0] - 2025-09-06
 
 This release introduces a comprehensive resilient connection module for production-ready, high-availability applications. The new resilient module provides automatic reconnection, heartbeat monitoring, and fault-tolerant event streaming while maintaining full backward compatibility with existing APIs.
 
 ### Added
-- **Resilient Connection Module**: Complete solution for production AMI connections
-  - `ResilientOptions` struct with extensive configuration options
-  - `connect_resilient()` function for creating resilient managers
-  - `infinite_events_stream()` for fault-tolerant event streaming
-- **Configurable Parameters**:
-  - `max_retries`: Configurable maximum retry attempts (default: 3)
-  - `heartbeat_interval`: Configurable heartbeat interval in seconds (default: 30)
-  - `watchdog_interval`: Configurable watchdog check interval (default: 1 second)
-  - `buffer_size`: Configurable event broadcaster buffer size (default: 2048)
+
+- **Resilient Connection Module**: Comprehensive solution for production-ready AMI connections with robust features:
+    - `ResilientOptions` struct offering extensive configuration options:
+        - `max_retries`: Configurable maximum retry attempts (default: 3)
+        - `heartbeat_interval`: Configurable heartbeat interval in seconds (default: 30)
+        - `watchdog_interval`: Configurable watchdog check interval (default: 1 second)
+        - `buffer_size`: Configurable event broadcaster buffer size (default: 2048)
+    - `connect_resilient()` function for creating resilient Manager instances
+    - `infinite_events_stream()` for fault-tolerant, never-ending event streaming
+    - **Heartbeat Monitoring**:
+        - `start_heartbeat_with_interval()` method for custom heartbeat intervals
+        - Backward-compatible `start_heartbeat()` method (uses 30-second default)
+        - Watchdog monitoring for automatic reconnection on heartbeat failures
+    - **Watchdog Functionality**: Monitors authentication status and triggers reconnection when needed
+    - **Configurable Buffer Sizes**: Optimized memory usage for high-throughput applications via `Manager::new_with_buffer(size)`
+
 - **Production-Ready Features**:
-  - Fixed 5-second retry delays for predictable reconnection behavior
-  - Comprehensive logging with timestamps and attempt tracking
-  - Stream instance identification for debugging multi-instance scenarios
-  - Global cumulative attempt counter that persists across stream recreations
-  - Optional metrics collection with `ResilientMetrics` struct
-- **Enhanced Heartbeat System**:
-  - `start_heartbeat_with_interval()` method for custom heartbeat intervals
-  - Backward-compatible `start_heartbeat()` method (uses 30-second default)
-  - Watchdog monitoring for automatic reconnection on heartbeat failures
-- **Advanced Logging**:
-  - Detailed reconnection attempt tracking with timing information
-  - Production-appropriate log levels (DEBUG for periodic events, INFO/WARN for significant events)
-  - Sleep duration verification to identify timing discrepancies
-  - Stream lifecycle tracking with unique instance identifiers
+    - Fixed 5-second retry delays for predictable reconnection behavior
+    - Comprehensive logging with timestamps and attempt tracking:
+        - Production-appropriate log levels (DEBUG for periodic events, INFO/WARN for significant events)
+        - Sleep duration verification to identify timing discrepancies
+        - Stream lifecycle tracking with unique instance identifiers
+    - Stream instance identification for debugging multi-instance scenarios
+    - Global cumulative attempt counter that persists across stream recreations
+    - Optional metrics collection with `ResilientMetrics` struct
 
-### Added
-
--   **Resilient Connection Module**: New `src/resilient.rs` module with production-ready features for mission-critical applications:
-    -   **Automatic Reconnection**: Seamless reconnection when connections are lost with configurable retry logic
-    -   **Heartbeat Monitoring**: Configurable ping intervals to detect connection issues early and maintain connection health
-    -   **Infinite Event Streams**: Never-ending event streams that handle reconnection transparently using `infinite_events_stream()`
-    -   **Watchdog Functionality**: Monitors authentication status and triggers reconnection when needed
-    -   **Configurable Buffer Sizes**: Optimized memory usage for high-throughput applications via `Manager::new_with_buffer(size)`
-
--   **New API Functions**:
-    -   `connect_resilient()` function for creating Manager instances with resilient features enabled
-    -   `infinite_events_stream()` for fault-tolerant, never-ending event streaming
-    -   `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
+- **New API Functions**:
+    - `connect_resilient()` function for creating Manager instances with resilient features enabled
+    - `infinite_events_stream()` for fault-tolerant, never-ending event streaming
+    - `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
 
 ### Changed
 
