@@ -7,7 +7,7 @@
 
 A modern, asynchronous, strongly-typed, and stream-based library for interacting with the Asterisk Manager Interface (AMI) in Rust.
 
-This crate simplifies communication with AMI by handling connection, authentication, sending actions, and consuming events in an idiomatic Rust way, using Tokio and a type system that helps prevent errors at compile time.
+This crate simplifies communication with AMI by handling connection, authentication, sending actions, and consuming events in an idiomatic Rust way, using Tokio and a type system that helps prevent errors at compile time. For production applications, it includes an optional resilient module with heartbeat monitoring, automatic reconnection, and fault-tolerant event streaming.
 
 ## Table of Contents
 
@@ -20,6 +20,7 @@ This crate simplifies communication with AMI by handling connection, authenticat
   - [Sending Actions](#sending-actions)
   - [Consuming Events](#consuming-events)
 - [📝 API Documentation with Utoipa](#-api-documentation-with-utoipa)
+- [🔌 Resilient Connections](#-resilient-connections)
 - [🔌 Reconnection Strategy](#-reconnection-strategy)
 - [🤝 Contributing](#-contributing)
 - [📜 License](#-license)
@@ -30,6 +31,7 @@ This crate simplifies communication with AMI by handling connection, authenticat
 -   **Intelligent Action Handling**: The `send_action` method automatically detects actions that return lists of events (e.g., `PJSIPShowEndpoints`). It transparently collects all related events and bundles them into a single, aggregated `AmiResponse`.
 -   **Robust Concurrency**: The internal architecture uses dedicated I/O tasks (Reader, Writer, and Dispatcher) to prevent deadlocks, ensuring high performance even when receiving a flood of events while sending actions.
 -   **Stream-Based API**: Consume AMI events reactively and efficiently using the `Stream` abstraction from `tokio_stream`.
+-   **Resilient Connections**: Optional resilient module with heartbeat monitoring, automatic reconnection, infinite event streams, and configurable buffer sizes for production environments.
 -   **Optional OpenAPI/Swagger Support**: Includes a `docs` feature flag to enable `utoipa::ToSchema` implementations on all public types, allowing for automatic and accurate API documentation generation.
 -   **Detailed Error Handling**: A comprehensive `AmiError` enum allows robust handling of different failure scenarios.
 
@@ -149,13 +151,83 @@ use utoipa::OpenApi;
 pub struct ApiDoc;
 ```
 
+## 🔌 Resilient Connections
+
+For production applications that require high availability and fault tolerance, the library provides a `resilient` module with automatic reconnection, heartbeat monitoring, and infinite event streams.
+
+### Features
+
+- **Automatic Reconnection**: Automatically reconnects when the connection is lost
+- **Heartbeat Monitoring**: Configurable ping intervals to detect connection issues  
+- **Infinite Event Streams**: Never-ending event streams that handle reconnection transparently
+- **Configurable Buffer Sizes**: Optimize memory usage for high-throughput applications
+- **Watchdog Functionality**: Monitors authentication status and triggers reconnection
+
+Configuration notes:
+
+- `heartbeat_interval` (seconds): controls how often a heartbeat `Ping` is sent when using the `resilient` module. Lower values mean faster failure detection but more AMI traffic.
+- `max_retries`: number of immediate reconnection attempts before adding 5-second delays in cycles. The logic works in cycles: first `max_retries` attempts are immediate, then one attempt with a 5-second delay, then the cycle repeats. Tune this depending on how aggressive you want reconnection attempts to be.
+- `metrics`: optional `ResilientMetrics` instance for collecting reconnection statistics (attempts, successes, failures, timing). Set to `Some(ResilientMetrics::new())` to enable metrics collection.
+
+### Example Usage
+
+```rust,no_run
+use asterisk_manager::resilient::{ResilientOptions, connect_resilient, infinite_events_stream};
+use asterisk_manager::ManagerOptions;
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let resilient_options = ResilientOptions {
+        manager_options: ManagerOptions {
+            port: 5038,
+            host: "127.0.0.1".to_string(),
+            username: "admin".to_string(),
+            password: "password".to_string(),
+            events: true,
+        },
+        buffer_size: 2048,
+        enable_heartbeat: true,
+        enable_watchdog: true,
+        heartbeat_interval: 30,
+        watchdog_interval: 1,
+    max_retries: 3,
+    };
+
+    // Option 1: Connect with resilient features
+    let manager = connect_resilient(resilient_options.clone()).await?;
+    
+    // Option 2: Create an infinite event stream that handles reconnection
+    let mut event_stream = infinite_events_stream(resilient_options).await?;
+    
+    tokio::pin!(event_stream);
+    
+    while let Some(event_result) = event_stream.next().await {
+        match event_result {
+            Ok(event) => println!("Received event: {:?}", event),
+            Err(e) => println!("Error receiving event: {:?}", e),
+        }
+    }
+    
+    Ok(())
+}
+```
+
 ## 🔌 Reconnection Strategy
 
-This library **does not** include built-in automatic reconnection logic by design. The philosophy is to provide robust building blocks so you can implement the reconnection strategy that best fits your application (e.g., exponential backoff, fixed number of attempts, etc.).
+### Traditional Approach
+
+The core library **does not** include built-in automatic reconnection logic by design. The philosophy is to provide robust building blocks so you can implement the reconnection strategy that best fits your application (e.g., fixed delays, exponential backoff, fixed number of attempts, etc.).
 
 When the connection is lost, methods like `send_action` will return an `AmiError::ConnectionClosed`, and the event stream will end. Your application should handle these signals by creating a new `Manager` instance and calling `connect_and_login` again.
 
-For a complete and robust example of a web application with resilient reconnection logic, see the [**`examples/actix_web_example.rs`**](https://www.google.com/search?q=examples/actix_web_example.rs) file in this repository.
+### Resilient Approach
+
+For applications that need automatic reconnection without manual implementation, use the `resilient` module described in the previous section. This provides production-ready reconnection logic with heartbeat monitoring and automatic retry mechanisms.
+
+For complete examples of both approaches, see:
+- **Traditional**: [`examples/actix_web_example.rs`](examples/actix_web_example.rs) - Manual reconnection handling
+- **Resilient**: [`examples/actix_web_resilient_example.rs`](examples/actix_web_resilient_example.rs) - Automatic reconnection
 
 ## 🤝 Contributing
 

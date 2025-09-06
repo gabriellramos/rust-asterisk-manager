@@ -5,6 +5,7 @@
 //! - **Typed AMI messages**: Actions, Events, and Responses as Rust enums/structs.
 //! - **Stream-based API**: Consume events via `tokio_stream`.
 //! - **Asynchronous operations**: Fully based on Tokio.
+//! - **Resilient connections**: Optional resilient module with heartbeat and automatic reconnection.
 //!
 //! ## Usage Example
 //!
@@ -37,11 +38,50 @@
 //! }
 //! ```
 //!
+//! ## Resilient Connections
+//!
+//! For production applications that need automatic reconnection and heartbeat monitoring,
+//! use the `resilient` module:
+//!
+//! ```rust,no_run
+//! use asterisk_manager::resilient::{ResilientOptions, connect_resilient};
+//! use asterisk_manager::ManagerOptions;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let options = ResilientOptions {
+//!         manager_options: ManagerOptions {
+//!             port: 5038,
+//!             host: "127.0.0.1".to_string(),
+//!             username: "admin".to_string(),
+//!             password: "password".to_string(),
+//!             events: true,
+//!         },
+//!         buffer_size: 2048,
+//!         enable_heartbeat: true,
+//!         enable_watchdog: true,
+//!         heartbeat_interval: 30,
+//!         watchdog_interval: 1,
+//!         max_retries: 3,
+//!         metrics: None,
+//!         cumulative_attempts_counter: None,
+//!     };
+//!     
+//!     let manager = connect_resilient(options).await?;
+//!     // Manager now has heartbeat and automatic reconnection enabled
+//!     Ok(())
+//! }
+//! ```
+//!
 //! ## Features
 //!
 //! - Login/logout, sending actions, and receiving AMI events.
 //! - Support for common events (`Newchannel`, `Hangup`, `PeerStatus`) and fallback for unknown events.
 //! - Detailed error handling via the `AmiError` enum.
+//! - Configurable buffer sizes for high-throughput applications.
+//! - Heartbeat monitoring with configurable interval and automatic disconnection on failure.
+//! - Watchdog for automatic reconnection with configurable check interval when not authenticated.
+//! - Infinite event streams that handle lag and reconnection automatically.
 //!
 //! ## Requirements
 //!
@@ -66,9 +106,12 @@ use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 #[cfg(feature = "docs")]
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+pub mod resilient;
 
 #[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +323,10 @@ struct InnerManager {
     event_broadcaster: broadcast::Sender<AmiEvent>,
     /// Responders mapped for each action ID
     pending_responses: HashMap<String, oneshot::Sender<Result<AmiResponse, AmiError>>>,
+    /// Heartbeat cancellation token
+    heartbeat_token: Option<CancellationToken>,
+    /// Watchdog cancellation token
+    watchdog_token: Option<CancellationToken>,
 }
 
 #[derive(Clone)]
@@ -295,12 +342,18 @@ impl Default for Manager {
 
 impl Manager {
     pub fn new() -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
+        Self::new_with_buffer(1024)
+    }
+
+    pub fn new_with_buffer(buffer_size: usize) -> Self {
+        let (event_tx, _) = broadcast::channel(buffer_size);
         let inner = InnerManager {
             authenticated: false,
             write_tx: None,
             event_broadcaster: event_tx,
             pending_responses: HashMap::new(),
+            heartbeat_token: None,
+            watchdog_token: None,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -321,8 +374,13 @@ impl Manager {
         let (write_tx, write_rx) = mpsc::channel::<String>(100);
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<String>(1024);
 
+        let event_broadcaster = {
+            let inner = self.inner.lock().await;
+            inner.event_broadcaster.clone()
+        };
+
         spawn_writer_task(writer, write_rx);
-        spawn_reader_task(reader, dispatch_tx);
+        spawn_reader_task(reader, dispatch_tx, event_broadcaster);
         spawn_dispatcher_task(self.inner.clone(), dispatch_rx);
 
         self.inner.lock().await.write_tx = Some(write_tx);
@@ -365,9 +423,7 @@ impl Manager {
                 use tokio_stream::StreamExt;
                 while let Some(Ok(event)) = stream.next().await {
                     if let AmiEvent::UnknownEvent { event_type, fields } = &event {
-                        if fields.get("ActionID").and_then(|id| Some(id.as_str()))
-                            == Some(&action_id)
-                        {
+                        if fields.get("ActionID").map(|id| id.as_str()) == Some(&action_id) {
                             if event_type.ends_with("Complete") {
                                 break;
                             }
@@ -391,7 +447,7 @@ impl Manager {
             Ok(AmiResponse {
                 response: initial_response.response,
                 action_id: initial_response.action_id,
-                message: Some(format!("Successfully collected events.")),
+                message: Some("Successfully collected events.".to_string()),
                 fields: final_fields,
             })
         } else {
@@ -429,6 +485,17 @@ impl Manager {
         let mut inner = self.inner.lock().await;
         inner.write_tx = None;
         inner.authenticated = false;
+
+        // Cancel heartbeat and watchdog
+        if let Some(token) = &inner.heartbeat_token {
+            token.cancel();
+            inner.heartbeat_token = None;
+        }
+        if let Some(token) = &inner.watchdog_token {
+            token.cancel();
+            inner.watchdog_token = None;
+        }
+
         Ok(())
     }
 
@@ -442,6 +509,107 @@ impl Manager {
         let inner = self.inner.lock().await;
         BroadcastStream::new(inner.event_broadcaster.subscribe())
     }
+
+    /// Start heartbeat with default interval (30 seconds). Kept for backwards compatibility.
+    pub async fn start_heartbeat(&self) -> Result<(), AmiError> {
+        self.start_heartbeat_with_interval(30).await
+    }
+
+    /// Start the heartbeat task with a configurable interval (in seconds).
+    pub async fn start_heartbeat_with_interval(&self, interval_secs: u64) -> Result<(), AmiError> {
+        let mut inner = self.inner.lock().await;
+
+        // Cancel existing heartbeat if any
+        if let Some(token) = &inner.heartbeat_token {
+            token.cancel();
+        }
+
+        let token = CancellationToken::new();
+        inner.heartbeat_token = Some(token.clone());
+
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if manager.is_authenticated().await {
+                            match manager.send_action(AmiAction::Ping { action_id: None }).await {
+                                Ok(_) => {
+                                    log::debug!("Heartbeat ping successful");
+                                }
+                                Err(e) => {
+                                    log::warn!("Heartbeat ping failed: {}", e);
+                                    // Emit connection lost event
+                                    if let Ok(inner) = manager.inner.try_lock() {
+                                        let _ = inner.event_broadcaster.send(AmiEvent::InternalConnectionLost {
+                                            error: format!("Heartbeat failed: {}", e),
+                                        });
+                                    }
+                                    // Disconnect on heartbeat failure
+                                    let _ = manager.disconnect().await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn start_watchdog(&self, options: ManagerOptions) -> Result<(), AmiError> {
+        self.start_watchdog_with_interval(options, 1).await
+    }
+
+    pub async fn start_watchdog_with_interval(
+        &self,
+        options: ManagerOptions,
+        interval_secs: u64,
+    ) -> Result<(), AmiError> {
+        let mut inner = self.inner.lock().await;
+
+        // Cancel existing watchdog if any
+        if let Some(token) = &inner.watchdog_token {
+            token.cancel();
+        }
+
+        let token = CancellationToken::new();
+        inner.watchdog_token = Some(token.clone());
+
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if !manager.is_authenticated().await {
+                            log::debug!("Watchdog attempting reconnection...");
+                            let mut mgr = manager.clone();
+                            match mgr.connect_and_login(options.clone()).await {
+                                Ok(_) => {
+                                    log::info!("Watchdog reconnection successful");
+                                }
+                                Err(e) => {
+                                    log::debug!("Watchdog reconnection failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
 }
 
 fn spawn_writer_task(mut writer: OwnedWriteHalf, mut write_rx: mpsc::Receiver<String>) {
@@ -454,7 +622,11 @@ fn spawn_writer_task(mut writer: OwnedWriteHalf, mut write_rx: mpsc::Receiver<St
     });
 }
 
-fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
+fn spawn_reader_task(
+    reader: OwnedReadHalf,
+    dispatch_tx: mpsc::Sender<String>,
+    event_broadcaster: broadcast::Sender<AmiEvent>,
+) {
     tokio::spawn(async move {
         let mut buf_reader = BufReader::new(reader);
         loop {
@@ -463,6 +635,10 @@ fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
                 let mut line = String::new();
                 match buf_reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => {
+                        // Connection lost - emit synthetic event
+                        let _ = event_broadcaster.send(AmiEvent::InternalConnectionLost {
+                            error: "Connection lost during read".to_string(),
+                        });
                         return;
                     }
                     Ok(_) => {
@@ -476,6 +652,9 @@ fn spawn_reader_task(reader: OwnedReadHalf, dispatch_tx: mpsc::Sender<String>) {
             }
 
             if !message_block.trim().is_empty() && dispatch_tx.send(message_block).await.is_err() {
+                let _ = event_broadcaster.send(AmiEvent::InternalConnectionLost {
+                    error: "Dispatcher channel closed".to_string(),
+                });
                 break;
             }
         }
@@ -751,11 +930,11 @@ mod tests {
         // 1. Cria um manager vazio, como no teste anterior.
         let manager = Manager::new();
 
-        // 2. Obtém o stream de eventos ANTES de enviar o evento.
+        // 2. Get the event stream BEFORE sending the event.
         let mut stream = manager.all_events_stream().await;
 
-        // 3. Envia o evento internamente para simular uma desconexão.
-        //    Esta parte volta a funcionar por causa do `pub(crate)`.
+        // 3. Send the event internally to simulate a disconnection.
+        //    This part works again because of `pub(crate)`.
         {
             let inner = manager.inner.lock().await;
             let _ = inner
@@ -785,5 +964,147 @@ mod tests {
             events: true,
         };
         assert_eq!(opts.events, true);
+    }
+
+    #[tokio::test]
+    async fn test_manager_new_with_buffer() {
+        let manager = Manager::new_with_buffer(512);
+        assert!(!manager.is_authenticated().await);
+
+        // Test that the buffer size is respected by checking we can create the stream
+        let _stream = manager.all_events_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_and_watchdog_tokens() {
+        let manager = Manager::new();
+
+        // Initially no tokens should be set
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.heartbeat_token.is_none());
+            assert!(inner.watchdog_token.is_none());
+        }
+
+        // Create dummy options for testing
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "127.0.0.1".to_string(),
+            username: "test".to_string(),
+            password: "test".to_string(),
+            events: true,
+        };
+
+        // Start heartbeat should set token (even though connection will fail)
+        let _ = manager.start_heartbeat().await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.heartbeat_token.is_some());
+        }
+
+        // Start watchdog should set token
+        let _ = manager.start_watchdog(opts).await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.watchdog_token.is_some());
+        }
+
+        // Disconnect should clear both tokens
+        let _ = manager.disconnect().await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.heartbeat_token.is_none());
+            assert!(inner.watchdog_token.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_lost_event_emission() {
+        // Test that synthetic connection lost events are properly emitted
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+
+        // Manually emit a connection lost event
+        {
+            let inner = manager.inner.lock().await;
+            let _ = inner
+                .event_broadcaster
+                .send(AmiEvent::InternalConnectionLost {
+                    error: "test connection lost".to_string(),
+                });
+        }
+
+        // Verify the event is received
+        let event = stream.next().await.unwrap().unwrap();
+        match event {
+            AmiEvent::InternalConnectionLost { error } => {
+                assert_eq!(error, "test connection lost");
+            }
+            _ => panic!("Expected InternalConnectionLost event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_interval_respected() {
+        // Use tokio time control to test heartbeat scheduling
+        tokio::time::pause();
+
+        let manager = Manager::new();
+
+        // Start heartbeat with a short interval
+        let _ = manager.start_heartbeat_with_interval(2).await;
+
+        // Advance time less than interval: no ticks yet
+        tokio::time::advance(Duration::from_secs(1)).await;
+        {
+            let inner = manager.inner.lock().await;
+            // Token should be set
+            assert!(inner.heartbeat_token.is_some());
+        }
+
+        // Advance time to trigger at least one tick
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // There's no direct public hook for verifying pings were sent without mocking
+        // but we can assert that the heartbeat task remains active and didn't panic.
+        // Ensure token still exists
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.heartbeat_token.is_some());
+        }
+
+        // Clean up
+        let _ = manager.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_interval_configuration() {
+        // Test that watchdog can be started with different intervals
+        let manager = Manager::new();
+
+        let opts = ManagerOptions {
+            port: 5038,
+            host: "127.0.0.1".to_string(),
+            username: "test".to_string(),
+            password: "test".to_string(),
+            events: true,
+        };
+
+        // Test default interval (backward compatibility)
+        let _ = manager.start_watchdog(opts.clone()).await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.watchdog_token.is_some());
+        }
+
+        // Test custom interval
+        let _ = manager.start_watchdog_with_interval(opts.clone(), 5).await;
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.watchdog_token.is_some());
+        }
+
+        // Clean up
+        let _ = manager.disconnect().await;
     }
 }

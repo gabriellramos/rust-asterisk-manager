@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-01-24
+
+This release introduces a comprehensive resilient connection module for production-ready, high-availability applications. The new resilient module provides automatic reconnection, heartbeat monitoring, and fault-tolerant event streaming while maintaining full backward compatibility with existing APIs.
+
+### Added
+- **Resilient Connection Module**: Complete solution for production AMI connections
+  - `ResilientOptions` struct with extensive configuration options
+  - `connect_resilient()` function for creating resilient managers
+  - `infinite_events_stream()` for fault-tolerant event streaming
+- **Configurable Parameters**:
+  - `max_retries`: Configurable maximum retry attempts (default: 3)
+  - `heartbeat_interval`: Configurable heartbeat interval in seconds (default: 30)
+  - `watchdog_interval`: Configurable watchdog check interval (default: 1 second)
+  - `buffer_size`: Configurable event broadcaster buffer size (default: 2048)
+- **Production-Ready Features**:
+  - Fixed 5-second retry delays for predictable reconnection behavior
+  - Comprehensive logging with timestamps and attempt tracking
+  - Stream instance identification for debugging multi-instance scenarios
+  - Global cumulative attempt counter that persists across stream recreations
+  - Optional metrics collection with `ResilientMetrics` struct
+- **Enhanced Heartbeat System**:
+  - `start_heartbeat_with_interval()` method for custom heartbeat intervals
+  - Backward-compatible `start_heartbeat()` method (uses 30-second default)
+  - Watchdog monitoring for automatic reconnection on heartbeat failures
+- **Advanced Logging**:
+  - Detailed reconnection attempt tracking with timing information
+  - Production-appropriate log levels (DEBUG for periodic events, INFO/WARN for significant events)
+  - Sleep duration verification to identify timing discrepancies
+  - Stream lifecycle tracking with unique instance identifiers
+
+### Added
+
+-   **Resilient Connection Module**: New `src/resilient.rs` module with production-ready features for mission-critical applications:
+    -   **Automatic Reconnection**: Seamless reconnection when connections are lost with configurable retry logic
+    -   **Heartbeat Monitoring**: Configurable ping intervals to detect connection issues early and maintain connection health
+    -   **Infinite Event Streams**: Never-ending event streams that handle reconnection transparently using `infinite_events_stream()`
+    -   **Watchdog Functionality**: Monitors authentication status and triggers reconnection when needed
+    -   **Configurable Buffer Sizes**: Optimized memory usage for high-throughput applications via `Manager::new_with_buffer(size)`
+
+-   **New API Functions**:
+    -   `connect_resilient()` function for creating Manager instances with resilient features enabled
+    -   `infinite_events_stream()` for fault-tolerant, never-ending event streaming
+    -   `ResilientOptions` configuration struct for fine-tuning resilient behavior (heartbeat intervals, buffer sizes, etc.)
+
+### Changed
+
+-   **ResilientOptions additions**: The `ResilientOptions` struct now exposes additional configuration knobs:
+    - `heartbeat_interval` (u64, seconds) — controls how often a heartbeat `Ping` is sent when `enable_heartbeat` is true (default: 30).
+    - `max_retries` (u32) — number of immediate reconnection attempts before adding 5-second delays in cycles (default: 3).
+    - `metrics` (Option<ResilientMetrics>) — optional metrics collection for monitoring reconnection behavior (default: None).
+
+-   **Improved reconnection logging**: Enhanced visibility into reconnection attempts with detailed logs including:
+    - Cumulative attempt counters and fixed 5-second delays
+    - Sleep duration tracking to identify timing issues
+    - Production-friendly log levels (periodic attempts use DEBUG, failures/successes use INFO/WARN)
+    - Timestamps for predicted retry times
+
+-   **Fixed delay implementation**: Uses fixed 5-second delays for predictable reconnection behavior and simplified troubleshooting.
+
+Upgrade note: If your code constructs `ResilientOptions` manually, add the `max_retries` and `metrics` fields or switch to `ResilientOptions::default()` and adjust fields as needed. The default values preserve the previous behavior (30s heartbeat, 3 retries, no metrics).-   **Production-Ready Examples**:
+    -   **Resilient Actix Web Example** (`examples/actix_web_resilient_example.rs`): Demonstrates resilient connections in a real-world web application scenario with automatic reconnection
+    -   **Examples Documentation** (`examples/README.md`): Comprehensive comparison between traditional and resilient approaches
+
+-   **Enhanced Documentation**: Updated README.md with detailed resilient features documentation, usage examples, and feature comparisons
+
+### Fixed
+
+-   Fixed compilation error in `examples/actix_web_example.rs` by removing incorrect `crate::` prefix
+
+### Enhanced
+
+-   **Testing**: Added 20 comprehensive unit tests covering all resilient functionality
+-   **Backward Compatibility**: All existing APIs remain unchanged and fully functional
+
+---
+
 ## [2.0.0] - 2025-06-20
 
 This release introduces a complete architectural overhaul for robust concurrency and adds intelligent features for handling complex AMI actions. It includes breaking changes to the connection API and response structures.

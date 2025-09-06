@@ -1,9 +1,9 @@
 [package]
 name = "asterisk-manager"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 authors = ["Gabriel Nascimento <gabrielramosnascimento195@gmail.com>"]
-description = "An asynchronous Rust library for interacting with the Asterisk Manager Interface (AMI), featuring a strongly-typed, stream-based API."
+description = "An asynchronous Rust library for interacting with the Asterisk Manager Interface (AMI), featuring a strongly-typed, stream-based API with resilient connections, automatic reconnection, and heartbeat monitoring."
 readme = "README.md"
 repository = "https://github.com/gabriellramos/rust-asterisk-manager"
 license-file = "LICENSE"
@@ -11,14 +11,17 @@ keywords = ["asterisk", "ami", "voip", "manager", "async"]
 categories = ["network-programming", "api-bindings", "asynchronous"]
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2.0.12"
 utoipa = { version = "5.4.0", optional = true }
+async-stream = "0.3"
+chrono = "0.4"
 
 [dev-dependencies]
 chrono = "0.4.41"
