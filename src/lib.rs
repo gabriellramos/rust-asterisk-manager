@@ -542,11 +542,11 @@ impl Manager {
                                     log::debug!("Heartbeat ping successful");
                                 }
                                 Err(e) => {
-                                    log::warn!("Heartbeat ping failed: {}", e);
+                                    log::warn!("Heartbeat ping failed: {e}");
                                     // Emit connection lost event
                                     if let Ok(inner) = manager.inner.try_lock() {
                                         let _ = inner.event_broadcaster.send(AmiEvent::InternalConnectionLost {
-                                            error: format!("Heartbeat failed: {}", e),
+                                            error: format!("Heartbeat failed: {e}"),
                                         });
                                     }
                                     // Disconnect on heartbeat failure
@@ -564,6 +564,12 @@ impl Manager {
     }
 
     pub async fn start_watchdog(&self, options: ManagerOptions) -> Result<(), AmiError> {
+        log::debug!(
+            "Starting watchdog (default interval=1s) for user '{}' at {}:{}",
+            options.username,
+            options.host,
+            options.port
+        );
         self.start_watchdog_with_interval(options, 1).await
     }
 
@@ -576,32 +582,60 @@ impl Manager {
 
         // Cancel existing watchdog if any
         if let Some(token) = &inner.watchdog_token {
+            log::debug!("Cancelling existing watchdog task before starting a new one");
             token.cancel();
         }
 
         let token = CancellationToken::new();
         inner.watchdog_token = Some(token.clone());
 
+        log::debug!(
+            "Spawning watchdog task (interval={}s) for user '{}' at {}:{}",
+            interval_secs,
+            options.username,
+            options.host,
+            options.port
+        );
+
         let manager = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            log::debug!(
+                "Watchdog task started (interval={}s) for '{}'@{}:{}",
+                interval_secs,
+                options.username,
+                options.host,
+                options.port
+            );
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
+                        log::debug!("Watchdog task cancelled by token");
                         break;
                     }
                     _ = interval.tick() => {
                         if !manager.is_authenticated().await {
-                            log::debug!("Watchdog attempting reconnection...");
+                            log::debug!(
+                                "Watchdog attempting reconnection to '{}'@{}:{}...",
+                                options.username, options.host, options.port
+                            );
                             let mut mgr = manager.clone();
                             match mgr.connect_and_login(options.clone()).await {
                                 Ok(_) => {
-                                    log::info!("Watchdog reconnection successful");
+                                    log::info!(
+                                        "Watchdog reconnection successful to '{}'@{}:{}",
+                                        options.username, options.host, options.port
+                                    );
                                 }
                                 Err(e) => {
-                                    log::debug!("Watchdog reconnection failed: {}", e);
+                                    log::debug!(
+                                        "Watchdog reconnection to '{}'@{}:{} failed: {}",
+                                        options.username, options.host, options.port, e
+                                    );
                                 }
                             }
+                        } else {
+                            log::trace!("Watchdog tick: already authenticated; no action taken");
                         }
                     }
                 }
@@ -721,32 +755,32 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             action_id,
         } => {
             s.push_str("Action: Login\r\n");
-            s.push_str(&format!("Username: {}\r\n", username));
-            s.push_str(&format!("Secret: {}\r\n", secret));
+            s.push_str(&format!("Username: {username}\r\n"));
+            s.push_str(&format!("Secret: {secret}\r\n"));
             if let Some(ev) = events {
-                s.push_str(&format!("Events: {}\r\n", ev));
+                s.push_str(&format!("Events: {ev}\r\n"));
             }
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Logoff { action_id } => {
             s.push_str("Action: Logoff\r\n");
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Ping { action_id } => {
             s.push_str("Action: Ping\r\n");
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Command { command, action_id } => {
             s.push_str("Action: Command\r\n");
-            s.push_str(&format!("Command: {}\r\n", command));
+            s.push_str(&format!("Command: {command}\r\n"));
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Custom {
@@ -754,12 +788,12 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             params,
             action_id,
         } => {
-            s.push_str(&format!("Action: {}\r\n", action_name));
+            s.push_str(&format!("Action: {action_name}\r\n"));
             for (k, v) in params {
-                s.push_str(&format!("{}: {}\r\n", k, v));
+                s.push_str(&format!("{k}: {v}\r\n"));
             }
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
     }
@@ -963,7 +997,7 @@ mod tests {
             password: "pwd".to_string(),
             events: true,
         };
-        assert_eq!(opts.events, true);
+        assert!(opts.events);
     }
 
     #[tokio::test]

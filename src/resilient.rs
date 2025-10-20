@@ -171,6 +171,9 @@ impl Default for ResilientOptions {
 /// This function creates a Manager instance with the specified buffer size,
 /// connects it, and optionally starts heartbeat and watchdog monitoring.
 pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, AmiError> {
+    log::debug!(
+        "Connecting resilient AMI manager with options: {options:?}"
+    );
     let mut manager = Manager::new_with_buffer(options.buffer_size);
 
     // Connect and login
@@ -180,6 +183,7 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start heartbeat if enabled
     if options.enable_heartbeat {
+        log::debug!("Starting heartbeat for resilient AMI manager");
         manager
             .start_heartbeat_with_interval(options.heartbeat_interval)
             .await?;
@@ -187,6 +191,7 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start watchdog if enabled
     if options.enable_watchdog {
+        log::debug!("Starting watchdog for resilient AMI manager");
         manager
             .start_watchdog_with_interval(options.manager_options, options.watchdog_interval)
             .await?;
@@ -247,7 +252,7 @@ fn create_infinite_stream(
                         }
                     }
                     Some(Err(BroadcastStreamRecvError::Lagged(count))) => {
-                        log::debug!("Event stream lagged by {} events, resubscribing", count);
+                        log::debug!("Event stream lagged by {count} events, resubscribing");
                         // Stream lagged, resubscribe to get a fresh receiver
                         event_stream = current_manager.all_events_stream().await;
                         continue;
@@ -292,7 +297,7 @@ fn create_infinite_stream(
                 );
 
                 // Try to reconnect and log result with attempt number
-                log::debug!("[{}] Attempting to reconnect now (attempt #{}, cumulative #{})", stream_id, retry_count, cumulative_attempts);
+                log::debug!("[{stream_id}] Attempting to reconnect now (attempt #{retry_count}, cumulative #{cumulative_attempts})");
                 match connect_resilient(options.clone()).await {
                     Ok(new_manager) => {
                         let reconnection_duration = reconnection_start.elapsed();
@@ -318,11 +323,7 @@ fn create_infinite_stream(
                             metrics.record_failed_reconnection();
                         }
                         log::debug!(
-                            "[{}] Reconnection attempt #{} failed: {}, retrying in {} seconds",
-                            stream_id,
-                            retry_count,
-                            e,
-                            retry_delay
+                            "[{stream_id}] Reconnection attempt #{retry_count} failed: {e}, retrying in {retry_delay} seconds"
                         );
 
                         // Apply delay if needed
@@ -348,7 +349,7 @@ fn create_infinite_stream(
                         }
 
                         // Continue the reconnection loop (will loop back to retry)
-                        log::trace!("[{}] Continuing reconnection loop for next attempt", stream_id);
+                        log::trace!("[{stream_id}] Continuing reconnection loop for next attempt");
                     }
                 }
             } // End of reconnection loop

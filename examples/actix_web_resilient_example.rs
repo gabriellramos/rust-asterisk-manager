@@ -134,13 +134,13 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                 info!("[HTTP] GET /calls - CoreShowChannels action sent successfully.");
             }
             Ok(resp) => {
-                let err_msg = format!("CoreShowChannels action failed with response: {:?}", resp);
-                error!("[HTTP] GET /calls - {}", err_msg);
+                let err_msg = format!("CoreShowChannels action failed with response: {resp:?}");
+                error!("[HTTP] GET /calls - {err_msg}");
                 return HttpResponse::InternalServerError().body(err_msg);
             }
             Err(e) => {
-                let err_msg = format!("Error sending CoreShowChannels action: {}", e);
-                error!("[HTTP] GET /calls - {}", err_msg);
+                let err_msg = format!("Error sending CoreShowChannels action: {e}");
+                error!("[HTTP] GET /calls - {err_msg}");
                 return HttpResponse::InternalServerError().body(err_msg);
             }
         }
@@ -319,7 +319,7 @@ async fn main() -> std::io::Result<()> {
             manager
         }
         Err(e) => {
-            error!("Failed to connect to AMI: {}. The application will continue and the resilient connection will keep trying to reconnect.", e);
+            error!("Failed to connect to AMI: {e}. The application will continue and the resilient connection will keep trying to reconnect.");
             // Even if initial connection fails, the resilient system will keep trying
             match connect_resilient(resilient_options.clone()).await {
                 Ok(manager) => manager,
@@ -357,7 +357,7 @@ async fn main() -> std::io::Result<()> {
         let event_stream = match infinite_events_stream(resilient_options_for_task).await {
             Ok(stream) => stream,
             Err(e) => {
-                error!("[EVENT_TASK] Failed to create infinite event stream: {}", e);
+                error!("[EVENT_TASK] Failed to create infinite event stream: {e}");
                 return;
             }
         };
@@ -402,7 +402,7 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
 
-                    info!("[AMI_EVENT] Received: {:?}", event);
+                    info!("[AMI_EVENT] Received: {event:?}");
                     let mut evs = app_state_for_task.events.lock().await;
                     evs.push(event);
 
@@ -410,8 +410,7 @@ async fn main() -> std::io::Result<()> {
                     if len > MAX_EVENT_BUFFER_SIZE {
                         let amount_to_drain = len - MAX_EVENT_BUFFER_SIZE;
                         info!(
-                            "[EVENT_TASK] Event limit reached, discarding {} old events.",
-                            amount_to_drain
+                            "[EVENT_TASK] Event limit reached, discarding {amount_to_drain} old events."
                         );
                         evs.drain(0..amount_to_drain);
                     }
@@ -426,8 +425,7 @@ async fn main() -> std::io::Result<()> {
                             _last_reconnection_duration_ms,
                         ) = app_state_for_task.metrics.snapshot();
                         info!(
-                            "[EVENT_TASK] Periodic status - Reconnections: {}, Lost: {}, Buffer: {}/{}",
-                            successful_reconnections, connection_lost_events, len, MAX_EVENT_BUFFER_SIZE
+                            "[EVENT_TASK] Periodic status - Reconnections: {successful_reconnections}, Lost: {connection_lost_events}, Buffer: {len}/{MAX_EVENT_BUFFER_SIZE}"
                         );
                         last_connection_check = Instant::now();
                     }
@@ -435,8 +433,7 @@ async fn main() -> std::io::Result<()> {
                 Err(e) => {
                     // The resilient stream handles reconnection, so errors here are just logged
                     error!(
-                        "[EVENT_TASK] Error in event stream (will auto-recover): {:?}",
-                        e
+                        "[EVENT_TASK] Error in event stream (will auto-recover): {e:?}"
                     );
                 }
             }

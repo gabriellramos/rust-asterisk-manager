@@ -57,8 +57,7 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> 
 
         attempts += 1;
         info!(
-            "[RECONNECT] Trying to reconnect to AMI... attempt {}",
-            attempts
+            "[RECONNECT] Trying to reconnect to AMI... attempt {attempts}"
         );
 
         match manager_guard
@@ -70,7 +69,7 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> 
                 return Ok(());
             }
             Err(e) => {
-                error!("[RECONNECT] Failed to reconnect: {}", e);
+                error!("[RECONNECT] Failed to reconnect: {e}");
                 match &e {
                     AmiError::Timeout | AmiError::ConnectionClosed | AmiError::Io(_)
                         if attempts < RETRY_LIMIT =>
@@ -148,7 +147,7 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
     info!("[HTTP] GET /calls - requesting list of active calls");
 
     if let Err(e) = ensure_manager_connected(&data).await {
-        return HttpResponse::InternalServerError().body(format!("Error reconnecting: {}", e));
+        return HttpResponse::InternalServerError().body(format!("Error reconnecting: {e}"));
     }
 
     let action_id = Uuid::new_v4().to_string();
@@ -166,13 +165,13 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
                 info!("[HTTP] GET /calls - CoreShowChannels action sent successfully.");
             }
             Ok(resp) => {
-                let err_msg = format!("CoreShowChannels action failed with response: {:?}", resp);
-                error!("[HTTP] GET /calls - {}", err_msg);
+                let err_msg = format!("CoreShowChannels action failed with response: {resp:?}");
+                error!("[HTTP] GET /calls - {err_msg}");
                 return HttpResponse::InternalServerError().body(err_msg);
             }
             Err(e) => {
-                let err_msg = format!("Error sending CoreShowChannels action: {}", e);
-                error!("[HTTP] GET /calls - {}", err_msg);
+                let err_msg = format!("Error sending CoreShowChannels action: {e}");
+                error!("[HTTP] GET /calls - {err_msg}");
                 return HttpResponse::InternalServerError().body(err_msg);
             }
         }
@@ -258,7 +257,7 @@ async fn main() -> std::io::Result<()> {
     let mut initial_manager = Manager::new();
 
     if let Err(e) = initial_manager.connect_and_login(options.clone()).await {
-        error!("Failed to connect to AMI on startup: {}. The application will run, but will try to reconnect on first action.", e);
+        error!("Failed to connect to AMI on startup: {e}. The application will run, but will try to reconnect on first action.");
     }
 
     let app_state = AppState {
@@ -277,8 +276,7 @@ async fn main() -> std::io::Result<()> {
 
             if let Err(e) = ensure_manager_connected(&app_state_for_task).await {
                 error!(
-                    "[EVENT_TASK] Failed to ensure manager connection: {}. Retrying in 5s...",
-                    e
+                    "[EVENT_TASK] Failed to ensure manager connection: {e}. Retrying in 5s..."
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
@@ -291,7 +289,7 @@ async fn main() -> std::io::Result<()> {
             while let Some(event_result) = event_stream.next().await {
                 match event_result {
                     Ok(event) => {
-                        info!("[AMI_EVENT] Received: {:?}", event);
+                        info!("[AMI_EVENT] Received: {event:?}");
                         let mut evs = app_state_for_task.events.lock().await;
                         evs.push(event);
 
@@ -299,14 +297,13 @@ async fn main() -> std::io::Result<()> {
                         if len > MAX_EVENT_BUFFER_SIZE {
                             let amount_to_drain = len - MAX_EVENT_BUFFER_SIZE;
                             info!(
-                                "[EVENT_TASK] Event limit reached, discarding {} old events.",
-                                amount_to_drain
+                                "[EVENT_TASK] Event limit reached, discarding {amount_to_drain} old events."
                             );
                             evs.drain(0..amount_to_drain);
                         }
                     }
                     Err(e) => {
-                        error!("[EVENT_TASK] Error receiving event from stream: {:?}. Restarting cycle.", e);
+                        error!("[EVENT_TASK] Error receiving event from stream: {e:?}. Restarting cycle.");
                         break;
                     }
                 }

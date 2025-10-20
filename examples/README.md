@@ -2,6 +2,20 @@
 
 This directory contains two Actix Web examples demonstrating different approaches to using the Asterisk Manager Interface (AMI) with this crate:
 
+## `watchdog_resilient_logging.rs` - Minimal Watchdog Demo
+
+A minimal example that focuses on the built-in watchdog reconnection loop and its logs.
+
+- Starts a `Manager` and enables only the watchdog (no web server)
+- Periodically logs authentication status
+- Shows watchdog logs like attempts, successes, and failures
+
+Quick start:
+
+```bash
+RUST_LOG=info,asterisk_manager=debug cargo run --example watchdog_resilient_logging
+```
+
 ## `actix_web_example.rs` - Traditional Approach
 
 The original example showing manual connection management with:
@@ -82,5 +96,8 @@ let resilient_options = ResilientOptions {
 
 - **Traditional (`actix_web_example.rs`)**: When you need full control over connection management or are integrating with existing manual retry systems
 - **Resilient (`actix_web_resilient_example.rs`)**: For production applications requiring automatic recovery, minimal maintenance, and 24/7 reliability
+
+For a quick look at the watchdog behavior and logs without running a web server, use
+`watchdog_resilient_logging.rs`.
 
 The resilient approach is recommended for most production use cases as it significantly reduces code complexity while providing more robust connection handling.
