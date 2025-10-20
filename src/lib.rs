@@ -327,6 +327,8 @@ struct InnerManager {
     heartbeat_token: Option<CancellationToken>,
     /// Watchdog cancellation token
     watchdog_token: Option<CancellationToken>,
+    /// Unique identifier for this manager instance (for logging)
+    instance_id: String,
 }
 
 #[derive(Clone)]
@@ -347,6 +349,8 @@ impl Manager {
 
     pub fn new_with_buffer(buffer_size: usize) -> Self {
         let (event_tx, _) = broadcast::channel(buffer_size);
+        let instance_id = Uuid::new_v4().to_string()[..8].to_string();
+        log::debug!("Creating new Manager instance [{instance_id}]");
         let inner = InnerManager {
             authenticated: false,
             write_tx: None,
@@ -354,6 +358,7 @@ impl Manager {
             pending_responses: HashMap::new(),
             heartbeat_token: None,
             watchdog_token: None,
+            instance_id,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -518,31 +523,37 @@ impl Manager {
     /// Start the heartbeat task with a configurable interval (in seconds).
     pub async fn start_heartbeat_with_interval(&self, interval_secs: u64) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
+        let instance_id = inner.instance_id.clone();
 
         // Cancel existing heartbeat if any
         if let Some(token) = &inner.heartbeat_token {
+            log::debug!("[{instance_id}] Cancelling existing heartbeat task");
             token.cancel();
         }
 
         let token = CancellationToken::new();
         inner.heartbeat_token = Some(token.clone());
 
+        log::debug!("[{instance_id}] Starting heartbeat task (interval={interval_secs}s)");
+
         let manager = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            log::debug!("[{instance_id}] Heartbeat task started");
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
+                        log::debug!("[{instance_id}] Heartbeat task cancelled");
                         break;
                     }
                     _ = interval.tick() => {
                         if manager.is_authenticated().await {
                             match manager.send_action(AmiAction::Ping { action_id: None }).await {
                                 Ok(_) => {
-                                    log::debug!("Heartbeat ping successful");
+                                    log::debug!("[{instance_id}] Heartbeat ping successful");
                                 }
                                 Err(e) => {
-                                    log::warn!("Heartbeat ping failed: {e}");
+                                    log::warn!("[{instance_id}] Heartbeat ping failed: {e}");
                                     // Emit connection lost event
                                     if let Ok(inner) = manager.inner.try_lock() {
                                         let _ = inner.event_broadcaster.send(AmiEvent::InternalConnectionLost {
@@ -554,6 +565,8 @@ impl Manager {
                                     break;
                                 }
                             }
+                        } else {
+                            log::trace!("[{instance_id}] Heartbeat tick: not authenticated, skipping ping");
                         }
                     }
                 }
@@ -564,8 +577,10 @@ impl Manager {
     }
 
     pub async fn start_watchdog(&self, options: ManagerOptions) -> Result<(), AmiError> {
+        let instance_id = self.inner.lock().await.instance_id.clone();
         log::debug!(
-            "Starting watchdog (default interval=1s) for user '{}' at {}:{}",
+            "[{}] Starting watchdog (default interval=1s) for user '{}' at {}:{}",
+            instance_id,
             options.username,
             options.host,
             options.port
@@ -579,10 +594,13 @@ impl Manager {
         interval_secs: u64,
     ) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
+        let instance_id = inner.instance_id.clone();
 
         // Cancel existing watchdog if any
         if let Some(token) = &inner.watchdog_token {
-            log::debug!("Cancelling existing watchdog task before starting a new one");
+            log::debug!(
+                "[{instance_id}] Cancelling existing watchdog task before starting a new one"
+            );
             token.cancel();
         }
 
@@ -590,7 +608,8 @@ impl Manager {
         inner.watchdog_token = Some(token.clone());
 
         log::debug!(
-            "Spawning watchdog task (interval={}s) for user '{}' at {}:{}",
+            "[{}] Spawning watchdog task (interval={}s) for user '{}' at {}:{}",
+            instance_id,
             interval_secs,
             options.username,
             options.host,
@@ -601,7 +620,8 @@ impl Manager {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             log::debug!(
-                "Watchdog task started (interval={}s) for '{}'@{}:{}",
+                "[{}] Watchdog task started (interval={}s) for '{}'@{}:{}",
+                instance_id,
                 interval_secs,
                 options.username,
                 options.host,
@@ -610,32 +630,35 @@ impl Manager {
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        log::debug!("Watchdog task cancelled by token");
+                        log::debug!("[{instance_id}] Watchdog task cancelled by token");
                         break;
                     }
                     _ = interval.tick() => {
                         if !manager.is_authenticated().await {
                             log::debug!(
-                                "Watchdog attempting reconnection to '{}'@{}:{}...",
+                                "[{}] Watchdog attempting reconnection to '{}'@{}:{}...",
+                                instance_id,
                                 options.username, options.host, options.port
                             );
                             let mut mgr = manager.clone();
                             match mgr.connect_and_login(options.clone()).await {
                                 Ok(_) => {
                                     log::info!(
-                                        "Watchdog reconnection successful to '{}'@{}:{}",
+                                        "[{}] Watchdog reconnection successful to '{}'@{}:{}",
+                                        instance_id,
                                         options.username, options.host, options.port
                                     );
                                 }
                                 Err(e) => {
                                     log::debug!(
-                                        "Watchdog reconnection to '{}'@{}:{} failed: {}",
+                                        "[{}] Watchdog reconnection to '{}'@{}:{} failed: {}",
+                                        instance_id,
                                         options.username, options.host, options.port, e
                                     );
                                 }
                             }
                         } else {
-                            log::trace!("Watchdog tick: already authenticated; no action taken");
+                            log::trace!("[{instance_id}] Watchdog tick: already authenticated; no action taken");
                         }
                     }
                 }

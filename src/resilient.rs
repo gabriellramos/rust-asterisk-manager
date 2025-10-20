@@ -171,10 +171,16 @@ impl Default for ResilientOptions {
 /// This function creates a Manager instance with the specified buffer size,
 /// connects it, and optionally starts heartbeat and watchdog monitoring.
 pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, AmiError> {
-    log::debug!(
-        "Connecting resilient AMI manager with options: {options:?}"
-    );
     let mut manager = Manager::new_with_buffer(options.buffer_size);
+    let instance_id = manager.inner.lock().await.instance_id.clone();
+
+    log::debug!(
+        "[{}] Connecting resilient AMI manager to '{}'@{}:{}",
+        instance_id,
+        options.manager_options.username,
+        options.manager_options.host,
+        options.manager_options.port
+    );
 
     // Connect and login
     manager
@@ -183,7 +189,7 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start heartbeat if enabled
     if options.enable_heartbeat {
-        log::debug!("Starting heartbeat for resilient AMI manager");
+        log::debug!("[{instance_id}] Starting heartbeat for resilient AMI manager");
         manager
             .start_heartbeat_with_interval(options.heartbeat_interval)
             .await?;
@@ -191,12 +197,13 @@ pub async fn connect_resilient(options: ResilientOptions) -> Result<Manager, Ami
 
     // Start watchdog if enabled
     if options.enable_watchdog {
-        log::debug!("Starting watchdog for resilient AMI manager");
+        log::debug!("[{instance_id}] Starting watchdog for resilient AMI manager");
         manager
             .start_watchdog_with_interval(options.manager_options, options.watchdog_interval)
             .await?;
     }
 
+    log::debug!("[{instance_id}] Resilient AMI manager connected successfully");
     Ok(manager)
 }
 
