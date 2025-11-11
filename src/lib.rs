@@ -216,7 +216,9 @@ pub enum AmiEvent {
     Hangup(HangupEventData),
     PeerStatus(PeerStatusEventData),
     UnknownEvent {
+        #[serde(rename = "Event")]
         event_type: String,
+        #[serde(flatten)]
         fields: HashMap<String, String>,
     },
     InternalConnectionLost {
@@ -1163,5 +1165,80 @@ mod tests {
 
         // Clean up
         let _ = manager.disconnect().await;
+    }
+
+    #[test]
+    fn test_unknown_event_serialization_roundtrip() {
+        // Test that UnknownEvent can be serialized and deserialized without data loss
+        let mut fields = HashMap::new();
+        fields.insert("Event".to_string(), "ContactStatus".to_string());
+        fields.insert("AOR".to_string(), "1000021005".to_string());
+        fields.insert("ContactStatus".to_string(), "Removed".to_string());
+
+        let original = AmiEvent::UnknownEvent {
+            event_type: "ContactStatus".to_string(),
+            fields: fields.clone(),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&original).unwrap();
+        
+        // Deserialize back
+        let deserialized: AmiEvent = serde_json::from_str(&json).unwrap();
+        
+        // Verify it's still UnknownEvent with correct event_type
+        match deserialized {
+            AmiEvent::UnknownEvent { event_type, fields: deserialized_fields } => {
+                assert_eq!(event_type, "ContactStatus", "Event type should be preserved");
+                assert_eq!(
+                    deserialized_fields.get("AOR").map(|s| s.as_str()),
+                    Some("1000021005"),
+                    "Fields should be preserved"
+                );
+                assert_eq!(
+                    deserialized_fields.get("ContactStatus").map(|s| s.as_str()),
+                    Some("Removed"),
+                    "Fields should be preserved"
+                );
+            }
+            _ => panic!("Expected AmiEvent::UnknownEvent after deserialization, got {:?}", deserialized),
+        }
+    }
+
+    #[test]
+    fn test_unknown_event_kafka_scenario() {
+        // Simulate the exact scenario from the bug report:
+        // Library creates UnknownEvent -> Serialize to Kafka -> Deserialize from Kafka
+        
+        // 1. Library creates UnknownEvent when receiving an event from Asterisk
+        let mut fields = HashMap::new();
+        fields.insert("Event".to_string(), "ContactStatus".to_string());
+        fields.insert("AOR".to_string(), "1000021005".to_string());
+        fields.insert("ContactStatus".to_string(), "Removed".to_string());
+        fields.insert("URI".to_string(), "sip:1000021005@10.0.0.1:5060".to_string());
+        
+        let original = AmiEvent::UnknownEvent {
+            event_type: "ContactStatus".to_string(),
+            fields: fields.clone(),
+        };
+
+        // 2. Serialize (e.g., to send via Kafka)
+        let json = serde_json::to_string(&original).unwrap();
+
+        // 3. Deserialize (e.g., consumer receives from Kafka)
+        let deserialized: AmiEvent = serde_json::from_str(&json).unwrap();
+
+        // 4. Verify all data is preserved
+        match deserialized {
+            AmiEvent::UnknownEvent { event_type, fields: deserialized_fields } => {
+                assert_eq!(event_type, "ContactStatus");
+                assert_eq!(deserialized_fields.get("AOR"), Some(&"1000021005".to_string()));
+                assert_eq!(deserialized_fields.get("ContactStatus"), Some(&"Removed".to_string()));
+                assert_eq!(deserialized_fields.get("URI"), Some(&"sip:1000021005@10.0.0.1:5060".to_string()));
+                // The Event field should also be preserved in fields
+                assert_eq!(deserialized_fields.get("Event"), Some(&"ContactStatus".to_string()));
+            }
+            _ => panic!("Expected UnknownEvent with ContactStatus, got {:?}", deserialized),
+        }
     }
 }
