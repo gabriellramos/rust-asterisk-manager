@@ -228,6 +228,12 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
+    // Optional AMI connection environment variables (.env or exported):
+    //   AMI_HOST=localhost
+    //   AMI_PORT=5038
+    //   AMI_USERNAME=admin
+    //   AMI_PASSWORD=password
+    // Defaults below are applied when variables are missing.
 
     Builder::from_env(Env::new().default_filter_or("info"))
         .format(|buf, record| {

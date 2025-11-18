@@ -16,6 +16,17 @@ use std::io::Write;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
+    // Optional environment variables (.env) to override defaults used below.
+    // Create a .env file with e.g.:
+    //   AMI_HOST_1=127.0.0.1
+    //   AMI_PORT_1=5038
+    //   AMI_USERNAME_1=admin
+    //   AMI_PASSWORD_1=password
+    //   AMI_HOST_2=127.0.0.1
+    //   AMI_PORT_2=5039
+    //   AMI_USERNAME_2=admin2
+    //   AMI_PASSWORD_2=password2
+    // If not set, the fallback values in the ResilientOptions below are used.
 
     // Configure logger
     Builder::from_env(Env::new().default_filter_or("info"))

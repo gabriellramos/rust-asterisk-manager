@@ -269,6 +269,13 @@ async fn health_check(data: web::Data<AppState>) -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
+    // Optional AMI/resilient connection environment variables (.env or exported):
+    //   AMI_HOST=localhost
+    //   AMI_PORT=5038
+    //   AMI_USERNAME=admin
+    //   AMI_PASSWORD=password
+    //   AMI_HEARTBEAT_INTERVAL=30    # seconds
+    // Provide overrides for production; defaults below are used otherwise.
 
     Builder::from_env(Env::new().default_filter_or("info"))
         .format(|buf, record| {

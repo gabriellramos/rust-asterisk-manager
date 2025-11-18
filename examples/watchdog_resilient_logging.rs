@@ -20,6 +20,12 @@ use std::io::Write;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
+    // Optional AMI connection environment variables (load from .env or exported):
+    //   AMI_HOST=127.0.0.1
+    //   AMI_PORT=5038
+    //   AMI_USERNAME=admin
+    //   AMI_PASSWORD=password
+    // Defaults below are used if variables are absent.
 
     // Configure logger: default to "info" but allow overriding via RUST_LOG
     Builder::from_env(Env::new().default_filter_or("info"))
