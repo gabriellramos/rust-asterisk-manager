@@ -1,6 +1,6 @@
 [package]
 name = "asterisk-manager"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["Gabriel Nascimento <gabrielramosnascimento195@gmail.com>"]
 description = "An asynchronous Rust library for interacting with the Asterisk Manager Interface (AMI), featuring a strongly-typed, stream-based API with resilient connections, automatic reconnection, and heartbeat monitoring."

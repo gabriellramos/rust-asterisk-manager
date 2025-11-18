@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2025-11-18
+
+### Fixed
+
+-   Fixed serialization of `AmiEvent::UnknownEvent` to the proper AMI shape, preserving the `Event` field and flattening all additional fields. Ensures stable JSON roundtrip. If your code relied on the previous (incorrect) representation, adjust your deserialization.
+
+### Added
+
+-   Traceability: per-`Manager` `instance_id` with standardized logs on creation, heartbeat, and watchdog.
+-   Examples:
+    -   `examples/watchdog_resilient_logging.rs`: minimal watchdog with logs.
+    -   `examples/multiple_managers_logging.rs`: multiple Managers with `instance_id` in logs.
+    -   `examples/roundtrip_demo.rs`: demonstrates corrected `UnknownEvent` roundtrip.
+    -   `examples/INSTANCE_ID.md`: `instance_id` documentation.
+
+### Changed
+
+-   Standardized log messages using `{}` interpolation; improved message consistency.
+-   Improved `serialize_ami_action` string interpolation.
+
+---
+
 ## [2.1.0] - 2025-09-06
 
 This release introduces a comprehensive resilient connection module for production-ready, high-availability applications. The new resilient module provides automatic reconnection, heartbeat monitoring, and fault-tolerant event streaming while maintaining full backward compatibility with existing APIs.

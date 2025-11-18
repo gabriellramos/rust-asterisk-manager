@@ -216,7 +216,9 @@ pub enum AmiEvent {
     Hangup(HangupEventData),
     PeerStatus(PeerStatusEventData),
     UnknownEvent {
+        #[serde(rename = "Event")]
         event_type: String,
+        #[serde(flatten)]
         fields: HashMap<String, String>,
     },
     InternalConnectionLost {
@@ -327,6 +329,8 @@ struct InnerManager {
     heartbeat_token: Option<CancellationToken>,
     /// Watchdog cancellation token
     watchdog_token: Option<CancellationToken>,
+    /// Unique identifier for this manager instance (for logging)
+    instance_id: String,
 }
 
 #[derive(Clone)]
@@ -347,6 +351,8 @@ impl Manager {
 
     pub fn new_with_buffer(buffer_size: usize) -> Self {
         let (event_tx, _) = broadcast::channel(buffer_size);
+        let instance_id = Uuid::new_v4().to_string()[..8].to_string();
+        log::debug!("Creating new Manager instance [{instance_id}]");
         let inner = InnerManager {
             authenticated: false,
             write_tx: None,
@@ -354,6 +360,7 @@ impl Manager {
             pending_responses: HashMap::new(),
             heartbeat_token: None,
             watchdog_token: None,
+            instance_id,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -518,35 +525,41 @@ impl Manager {
     /// Start the heartbeat task with a configurable interval (in seconds).
     pub async fn start_heartbeat_with_interval(&self, interval_secs: u64) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
+        let instance_id = inner.instance_id.clone();
 
         // Cancel existing heartbeat if any
         if let Some(token) = &inner.heartbeat_token {
+            log::debug!("[{instance_id}] Cancelling existing heartbeat task");
             token.cancel();
         }
 
         let token = CancellationToken::new();
         inner.heartbeat_token = Some(token.clone());
 
+        log::debug!("[{instance_id}] Starting heartbeat task (interval={interval_secs}s)");
+
         let manager = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            log::debug!("[{instance_id}] Heartbeat task started");
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
+                        log::debug!("[{instance_id}] Heartbeat task cancelled");
                         break;
                     }
                     _ = interval.tick() => {
                         if manager.is_authenticated().await {
                             match manager.send_action(AmiAction::Ping { action_id: None }).await {
                                 Ok(_) => {
-                                    log::debug!("Heartbeat ping successful");
+                                    log::debug!("[{instance_id}] Heartbeat ping successful");
                                 }
                                 Err(e) => {
-                                    log::warn!("Heartbeat ping failed: {}", e);
+                                    log::warn!("[{instance_id}] Heartbeat ping failed: {e}");
                                     // Emit connection lost event
                                     if let Ok(inner) = manager.inner.try_lock() {
                                         let _ = inner.event_broadcaster.send(AmiEvent::InternalConnectionLost {
-                                            error: format!("Heartbeat failed: {}", e),
+                                            error: format!("Heartbeat failed: {e}"),
                                         });
                                     }
                                     // Disconnect on heartbeat failure
@@ -554,6 +567,8 @@ impl Manager {
                                     break;
                                 }
                             }
+                        } else {
+                            log::trace!("[{instance_id}] Heartbeat tick: not authenticated, skipping ping");
                         }
                     }
                 }
@@ -564,6 +579,14 @@ impl Manager {
     }
 
     pub async fn start_watchdog(&self, options: ManagerOptions) -> Result<(), AmiError> {
+        let instance_id = self.inner.lock().await.instance_id.clone();
+        log::debug!(
+            "[{}] Starting watchdog (default interval=1s) for user '{}' at {}:{}",
+            instance_id,
+            options.username,
+            options.host,
+            options.port
+        );
         self.start_watchdog_with_interval(options, 1).await
     }
 
@@ -573,35 +596,71 @@ impl Manager {
         interval_secs: u64,
     ) -> Result<(), AmiError> {
         let mut inner = self.inner.lock().await;
+        let instance_id = inner.instance_id.clone();
 
         // Cancel existing watchdog if any
         if let Some(token) = &inner.watchdog_token {
+            log::debug!(
+                "[{instance_id}] Cancelling existing watchdog task before starting a new one"
+            );
             token.cancel();
         }
 
         let token = CancellationToken::new();
         inner.watchdog_token = Some(token.clone());
 
+        log::debug!(
+            "[{}] Spawning watchdog task (interval={}s) for user '{}' at {}:{}",
+            instance_id,
+            interval_secs,
+            options.username,
+            options.host,
+            options.port
+        );
+
         let manager = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            log::debug!(
+                "[{}] Watchdog task started (interval={}s) for '{}'@{}:{}",
+                instance_id,
+                interval_secs,
+                options.username,
+                options.host,
+                options.port
+            );
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
+                        log::debug!("[{instance_id}] Watchdog task cancelled by token");
                         break;
                     }
                     _ = interval.tick() => {
                         if !manager.is_authenticated().await {
-                            log::debug!("Watchdog attempting reconnection...");
+                            log::debug!(
+                                "[{}] Watchdog attempting reconnection to '{}'@{}:{}...",
+                                instance_id,
+                                options.username, options.host, options.port
+                            );
                             let mut mgr = manager.clone();
                             match mgr.connect_and_login(options.clone()).await {
                                 Ok(_) => {
-                                    log::info!("Watchdog reconnection successful");
+                                    log::info!(
+                                        "[{}] Watchdog reconnection successful to '{}'@{}:{}",
+                                        instance_id,
+                                        options.username, options.host, options.port
+                                    );
                                 }
                                 Err(e) => {
-                                    log::debug!("Watchdog reconnection failed: {}", e);
+                                    log::debug!(
+                                        "[{}] Watchdog reconnection to '{}'@{}:{} failed: {}",
+                                        instance_id,
+                                        options.username, options.host, options.port, e
+                                    );
                                 }
                             }
+                        } else {
+                            log::trace!("[{instance_id}] Watchdog tick: already authenticated; no action taken");
                         }
                     }
                 }
@@ -721,32 +780,32 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             action_id,
         } => {
             s.push_str("Action: Login\r\n");
-            s.push_str(&format!("Username: {}\r\n", username));
-            s.push_str(&format!("Secret: {}\r\n", secret));
+            s.push_str(&format!("Username: {username}\r\n"));
+            s.push_str(&format!("Secret: {secret}\r\n"));
             if let Some(ev) = events {
-                s.push_str(&format!("Events: {}\r\n", ev));
+                s.push_str(&format!("Events: {ev}\r\n"));
             }
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Logoff { action_id } => {
             s.push_str("Action: Logoff\r\n");
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Ping { action_id } => {
             s.push_str("Action: Ping\r\n");
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Command { command, action_id } => {
             s.push_str("Action: Command\r\n");
-            s.push_str(&format!("Command: {}\r\n", command));
+            s.push_str(&format!("Command: {command}\r\n"));
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
         AmiAction::Custom {
@@ -754,12 +813,12 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             params,
             action_id,
         } => {
-            s.push_str(&format!("Action: {}\r\n", action_name));
+            s.push_str(&format!("Action: {action_name}\r\n"));
             for (k, v) in params {
-                s.push_str(&format!("{}: {}\r\n", k, v));
+                s.push_str(&format!("{k}: {v}\r\n"));
             }
             if let Some(id) = action_id {
-                s.push_str(&format!("ActionID: {}\r\n", id));
+                s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
     }
@@ -963,7 +1022,7 @@ mod tests {
             password: "pwd".to_string(),
             events: true,
         };
-        assert_eq!(opts.events, true);
+        assert!(opts.events);
     }
 
     #[tokio::test]
@@ -1106,5 +1165,80 @@ mod tests {
 
         // Clean up
         let _ = manager.disconnect().await;
+    }
+
+    #[test]
+    fn test_unknown_event_serialization_roundtrip() {
+        // Test that UnknownEvent can be serialized and deserialized without data loss
+        let mut fields = HashMap::new();
+        fields.insert("Event".to_string(), "ContactStatus".to_string());
+        fields.insert("AOR".to_string(), "1000021005".to_string());
+        fields.insert("ContactStatus".to_string(), "Removed".to_string());
+
+        let original = AmiEvent::UnknownEvent {
+            event_type: "ContactStatus".to_string(),
+            fields: fields.clone(),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&original).unwrap();
+        
+        // Deserialize back
+        let deserialized: AmiEvent = serde_json::from_str(&json).unwrap();
+        
+        // Verify it's still UnknownEvent with correct event_type
+        match deserialized {
+            AmiEvent::UnknownEvent { event_type, fields: deserialized_fields } => {
+                assert_eq!(event_type, "ContactStatus", "Event type should be preserved");
+                assert_eq!(
+                    deserialized_fields.get("AOR").map(|s| s.as_str()),
+                    Some("1000021005"),
+                    "Fields should be preserved"
+                );
+                assert_eq!(
+                    deserialized_fields.get("ContactStatus").map(|s| s.as_str()),
+                    Some("Removed"),
+                    "Fields should be preserved"
+                );
+            }
+            _ => panic!("Expected AmiEvent::UnknownEvent after deserialization, got {:?}", deserialized),
+        }
+    }
+
+    #[test]
+    fn test_unknown_event_kafka_scenario() {
+        // Simulate the exact scenario from the bug report:
+        // Library creates UnknownEvent -> Serialize to Kafka -> Deserialize from Kafka
+        
+        // 1. Library creates UnknownEvent when receiving an event from Asterisk
+        let mut fields = HashMap::new();
+        fields.insert("Event".to_string(), "ContactStatus".to_string());
+        fields.insert("AOR".to_string(), "1000021005".to_string());
+        fields.insert("ContactStatus".to_string(), "Removed".to_string());
+        fields.insert("URI".to_string(), "sip:1000021005@10.0.0.1:5060".to_string());
+        
+        let original = AmiEvent::UnknownEvent {
+            event_type: "ContactStatus".to_string(),
+            fields: fields.clone(),
+        };
+
+        // 2. Serialize (e.g., to send via Kafka)
+        let json = serde_json::to_string(&original).unwrap();
+
+        // 3. Deserialize (e.g., consumer receives from Kafka)
+        let deserialized: AmiEvent = serde_json::from_str(&json).unwrap();
+
+        // 4. Verify all data is preserved
+        match deserialized {
+            AmiEvent::UnknownEvent { event_type, fields: deserialized_fields } => {
+                assert_eq!(event_type, "ContactStatus");
+                assert_eq!(deserialized_fields.get("AOR"), Some(&"1000021005".to_string()));
+                assert_eq!(deserialized_fields.get("ContactStatus"), Some(&"Removed".to_string()));
+                assert_eq!(deserialized_fields.get("URI"), Some(&"sip:1000021005@10.0.0.1:5060".to_string()));
+                // The Event field should also be preserved in fields
+                assert_eq!(deserialized_fields.get("Event"), Some(&"ContactStatus".to_string()));
+            }
+            _ => panic!("Expected UnknownEvent with ContactStatus, got {:?}", deserialized),
+        }
     }
 }
