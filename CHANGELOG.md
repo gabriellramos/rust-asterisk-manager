@@ -9,21 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
--   Corrigida a serialização de `AmiEvent::UnknownEvent` para o formato AMI correto, preservando o campo `Event` e todos os campos adicionais via flatten. Garante roundtrip JSON estável. Caso seu código dependesse do formato anterior (incorreto), ajuste sua desserialização.
+-   Fixed serialization of `AmiEvent::UnknownEvent` to the proper AMI shape, preserving the `Event` field and flattening all additional fields. Ensures stable JSON roundtrip. If your code relied on the previous (incorrect) representation, adjust your deserialization.
 
 ### Added
 
--   Rastreabilidade: `instance_id` por `Manager` com logs padronizados em criação, heartbeat e watchdog.
--   Exemplos:
-    -   `examples/watchdog_resilient_logging.rs`: watchdog mínimo com logs.
-    -   `examples/multiple_managers_logging.rs`: múltiplos Managers com `instance_id` nos logs.
-    -   `examples/roundtrip_demo.rs`: demonstra o roundtrip corrigido de `UnknownEvent`.
-    -   `examples/INSTANCE_ID.md`: documentação de `instance_id`.
+-   Traceability: per-`Manager` `instance_id` with standardized logs on creation, heartbeat, and watchdog.
+-   Examples:
+    -   `examples/watchdog_resilient_logging.rs`: minimal watchdog with logs.
+    -   `examples/multiple_managers_logging.rs`: multiple Managers with `instance_id` in logs.
+    -   `examples/roundtrip_demo.rs`: demonstrates corrected `UnknownEvent` roundtrip.
+    -   `examples/INSTANCE_ID.md`: `instance_id` documentation.
 
 ### Changed
 
--   Padronização de logs usando interpolação `{}` e melhorias de mensagens.
--   `serialize_ami_action` com interpolação formatada.
+-   Standardized log messages using `{}` interpolation; improved message consistency.
+-   Improved `serialize_ami_action` string interpolation.
 
 ---
 
