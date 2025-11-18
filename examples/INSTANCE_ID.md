@@ -1,47 +1,47 @@
-# Instance ID para Logging
+# Instance ID for Logging
 
-## O que é
+## What It Is
 
-Cada instância de `Manager` agora possui um **instance_id** único (primeiros 8 caracteres de um UUID v4), automaticamente gerado quando o Manager é criado. Este ID aparece em todos os logs relacionados àquela instância específica.
+Each `Manager` instance now has a unique **instance_id** (first 8 characters of a UUID v4), automatically generated at creation time. This ID appears in all logs associated with that specific instance.
 
-## Por que usar
+## Why It Matters
 
-Quando você tem múltiplas conexões AMI simultâneas (por exemplo, conectando a diferentes servidores Asterisk ou mantendo múltiplas conexões ao mesmo servidor), o instance_id permite distinguir claramente qual Manager está gerando cada log.
+When you maintain multiple simultaneous AMI connections (e.g. different Asterisk servers or several connections to the same server), the `instance_id` lets you immediately distinguish which `Manager` produced a log line.
 
-## Onde aparece nos logs
+## Where It Appears in Logs
 
-O instance_id aparece em logs de:
+The `instance_id` is included in logs for:
 
-### Manager básico
-- Criação: `Creating new Manager instance [abc12345]`
+### Core Manager
+- Creation: `Creating new Manager instance [abc12345]`
 
 ### Heartbeat
-- Início: `[abc12345] Starting heartbeat task (interval=30s)`
-- Tick: `[abc12345] Heartbeat ping successful`
-- Falha: `[abc12345] Heartbeat ping failed: <erro>`
-- Cancelamento: `[abc12345] Heartbeat task cancelled`
+- Start: `[abc12345] Starting heartbeat task (interval=30s)`
+- Success tick: `[abc12345] Heartbeat ping successful`
+- Failure: `[abc12345] Heartbeat ping failed: <error>`
+- Cancellation: `[abc12345] Heartbeat task cancelled`
 
 ### Watchdog
-- Início: `[abc12345] Starting watchdog (default interval=1s) for user 'admin' at 127.0.0.1:5038`
-- Tentativa: `[abc12345] Watchdog attempting reconnection to 'admin'@127.0.0.1:5038...`
-- Sucesso: `[abc12345] Watchdog reconnection successful to 'admin'@127.0.0.1:5038`
-- Falha: `[abc12345] Watchdog reconnection to 'admin'@127.0.0.1:5038 failed: <erro>`
-- Cancelamento: `[abc12345] Watchdog task cancelled by token`
+- Start: `[abc12345] Starting watchdog (default interval=1s) for user 'admin' at 127.0.0.1:5038`
+- Attempt: `[abc12345] Watchdog attempting reconnection to 'admin'@127.0.0.1:5038...`
+- Success: `[abc12345] Watchdog reconnection successful to 'admin'@127.0.0.1:5038`
+- Failure: `[abc12345] Watchdog reconnection to 'admin'@127.0.0.1:5038 failed: <error>`
+- Cancellation: `[abc12345] Watchdog task cancelled by token`
 
-### Resilient module
-- Conexão: `[abc12345] Connecting resilient AMI manager to 'admin'@127.0.0.1:5038`
-- Stream: `Creating new resilient stream instance [def67890]` (streams têm seus próprios IDs)
+### Resilient Module
+- Connection: `[abc12345] Connecting resilient AMI manager to 'admin'@127.0.0.1:5038`
+- Stream creation: `Creating new resilient stream instance [def67890]` (streams have their own IDs)
 
-## Exemplos práticos
+## Practical Examples
 
-### Logs de uma única conexão
+### Single Connection Logs
 ```
 [2025-10-20 ... DEBUG asterisk_manager] Creating new Manager instance [a1b2c3d4]
 [2025-10-20 ... DEBUG asterisk_manager] [a1b2c3d4] Starting heartbeat task (interval=30s)
 [2025-10-20 ... DEBUG asterisk_manager] [a1b2c3d4] Heartbeat ping successful
 ```
 
-### Logs de múltiplas conexões simultâneas
+### Multiple Concurrent Connections
 ```
 [2025-10-20 ... DEBUG asterisk_manager] Creating new Manager instance [a1b2c3d4]
 [2025-10-20 ... DEBUG asterisk_manager] [a1b2c3d4] Connecting resilient AMI manager to 'admin'@127.0.0.1:5038
@@ -52,32 +52,32 @@ O instance_id aparece em logs de:
 [2025-10-20 ... DEBUG asterisk_manager] [a1b2c3d4] Watchdog tick: already authenticated; no action taken
 ```
 
-Neste exemplo, você pode ver claramente que:
-- `[a1b2c3d4]` é a primeira conexão (porta 5038)
-- `[e5f6g7h8]` é a segunda conexão (porta 5039)
+In this example you can clearly see:
+- `[a1b2c3d4]` is the first connection (port 5038)
+- `[e5f6g7h8]` is the second connection (port 5039)
 
-## Como usar nos seus logs
+## When to Use It in Your Own Logs
 
-O instance_id é especialmente útil quando:
+The `instance_id` is especially useful for:
 
-1. **Depurando múltiplas conexões**: Rapidamente identifique qual conexão está com problema
-2. **Monitoramento**: Acompanhe métricas específicas por conexão
-3. **Troubleshooting**: Rastreie o ciclo de vida completo de uma conexão específica
-4. **Auditing**: Correlacione eventos através do tempo para uma única instância
+1. **Debugging multiple connections**: Quickly isolate which connection is misbehaving
+2. **Monitoring**: Track per-connection metrics or performance
+3. **Troubleshooting**: Follow the full lifecycle of a specific connection
+4. **Auditing**: Correlate events over time for one logical instance
 
-## Exemplos incluídos
+## Included Examples
 
-- `watchdog_resilient_logging.rs`: Mostra instance_id em uma única conexão
-- `multiple_managers_logging.rs`: Demonstra instance_id com múltiplas conexões simultâneas
+- `watchdog_resilient_logging.rs`: Shows `instance_id` in a single connection scenario
+- `multiple_managers_logging.rs`: Demonstrates `instance_id` across multiple concurrent connections
 
-## Habilitando logs detalhados
+## Enabling Detailed Logs
 
-Para ver todos os logs com instance_id:
+To view all logs with `instance_id`:
 
 ```bash
-# Logs debug de todas as operações
+# Debug-level logs for all operations
 RUST_LOG=asterisk_manager=debug cargo run --example multiple_managers_logging
 
-# Logs trace incluindo ticks do watchdog/heartbeat
+# Trace-level logs including heartbeat/watchdog ticks
 RUST_LOG=asterisk_manager=trace cargo run --example multiple_managers_logging
 ```
