@@ -36,6 +36,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Each manager will have a unique [instance_id] in logs");
     info!("");
 
+    // Optional: Configure via .env file:
+    //   # First manager
+    //   AMI_HOST_1=127.0.0.1
+    //   AMI_PORT_1=5038
+    //   AMI_USERNAME_1=admin
+    //   AMI_PASSWORD_1=password
+    //   # Second manager
+    //   AMI_HOST_2=127.0.0.1
+    //   AMI_PORT_2=5039
+    //   AMI_USERNAME_2=admin2
+    //   AMI_PASSWORD_2=password2
+
     // Configuration for first manager
     let options1 = ResilientOptions {
         manager_options: ManagerOptions {
