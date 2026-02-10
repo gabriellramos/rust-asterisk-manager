@@ -154,6 +154,27 @@ pub enum AmiAction {
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
+    /// Custom action for any AMI action not explicitly defined.
+    ///
+    /// The `params` field is a `Vec<(String, String)>` to allow duplicate keys,
+    /// which is required by some AMI actions. For example, the Originate action
+    /// can accept multiple "Variable" parameters:
+    ///
+    /// ```
+    /// use asterisk_manager::AmiAction;
+    ///
+    /// let action = AmiAction::Custom {
+    ///     action: "Originate".to_string(),
+    ///     params: vec![
+    ///         ("Channel".to_string(), "PJSIP/user1".to_string()),
+    ///         ("Application".to_string(), "Dial".to_string()),
+    ///         ("Variable".to_string(), "CDR(extra_data)=123".to_string()),
+    ///         ("Variable".to_string(), "__ID_EXTRA=456".to_string()),
+    ///         ("Variable".to_string(), "__ID_MAIN=789".to_string()),
+    ///     ],
+    ///     action_id: None,
+    /// };
+    /// ```
     Custom {
         action: String,
         #[serde(flatten)]

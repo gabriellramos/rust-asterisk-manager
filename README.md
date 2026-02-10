@@ -62,7 +62,6 @@ This example connects to AMI, sends a simple action (`Ping`), and then sends a l
 ```rust,no_run
 use asterisk_manager::{Manager, ManagerOptions, AmiAction};
 use tokio_stream::StreamExt;
-use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Sending a list-based action (PJSIPShowEndpoints) ---");
     let list_action = AmiAction::Custom { 
         action: "PJSIPShowEndpoints".to_string(), 
-        params: HashMap::new(),
+        params: vec![],
         action_id: None 
     };
     let list_response = manager.send_action(list_action).await?;
