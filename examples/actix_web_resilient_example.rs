@@ -42,6 +42,10 @@ struct ConnectionStatus {
 #[derive(Deserialize)]
 struct ActionRequest {
     action: String,
+    // Note: We use HashMap here for the HTTP API because JSON objects don't support
+    // duplicate keys. The HashMap is converted to Vec when creating AmiAction::Custom.
+    // If you need duplicate keys (e.g., multiple Variable parameters), you'll need to
+    // make multiple API calls or use a different HTTP request format.
     params: Option<std::collections::HashMap<String, String>>,
 }
 
