@@ -73,7 +73,7 @@ async fn post_action(data: web::Data<AppState>, req: web::Json<ActionRequest>) -
     let manager = data.manager.lock().await;
     let action = AmiAction::Custom {
         action: req.action.clone(),
-        params: req.params.clone().unwrap_or_default(),
+        params: req.params.clone().unwrap_or_default().into_iter().collect(),
         action_id: None,
     };
 
@@ -125,7 +125,7 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
         let manager = data.manager.lock().await;
         let action = AmiAction::Custom {
             action: "CoreShowChannels".to_string(),
-            params: std::collections::HashMap::new(),
+            params: vec![],
             action_id: Some(action_id.clone()),
         };
 

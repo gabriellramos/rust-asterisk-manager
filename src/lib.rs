@@ -157,7 +157,7 @@ pub enum AmiAction {
     Custom {
         action: String,
         #[serde(flatten)]
-        params: HashMap<String, String>,
+        params: Vec<(String, String)>,
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
@@ -814,7 +814,7 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             action_id,
         } => {
             s.push_str(&format!("Action: {action_name}\r\n"));
-            for (k, v) in params {
+            for (k, v) in params.iter() {
                 s.push_str(&format!("{k}: {v}\r\n"));
             }
             if let Some(id) = action_id {
@@ -875,6 +875,55 @@ mod tests {
         let s = serialize_ami_action(&action).unwrap();
         assert!(s.contains("Action: Command"));
         assert!(s.contains("Command: sip show peers"));
+    }
+
+    #[test]
+    fn test_serialize_custom_action() {
+        let action = AmiAction::Custom {
+            action: "Originate".to_string(),
+            params: vec![
+                ("Channel".to_string(), "PJSIP/user1".to_string()),
+                ("Application".to_string(), "Dial".to_string()),
+                ("Data".to_string(), "PJSIP/1234@trunk".to_string()),
+            ],
+            action_id: Some("test123".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: PJSIP/user1"));
+        assert!(s.contains("Application: Dial"));
+        assert!(s.contains("Data: PJSIP/1234@trunk"));
+        assert!(s.contains("ActionID: test123"));
+        assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_serialize_custom_action_with_duplicate_keys() {
+        let action = AmiAction::Custom {
+            action: "Originate".to_string(),
+            params: vec![
+                ("Channel".to_string(), "PJSIP/user1".to_string()),
+                ("Application".to_string(), "Dial".to_string()),
+                ("Data".to_string(), "PJSIP/1234@trunk".to_string()),
+                ("Variable".to_string(), "CDR(extra_data)=123".to_string()),
+                ("Variable".to_string(), "__ID_EXTRA=456".to_string()),
+                ("Variable".to_string(), "__ID_MAIN=789".to_string()),
+            ],
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: PJSIP/user1"));
+        assert!(s.contains("Application: Dial"));
+        assert!(s.contains("Data: PJSIP/1234@trunk"));
+        // Verify that all three Variable lines are present
+        assert!(s.contains("Variable: CDR(extra_data)=123"));
+        assert!(s.contains("Variable: __ID_EXTRA=456"));
+        assert!(s.contains("Variable: __ID_MAIN=789"));
+        // Count the number of "Variable:" occurrences
+        let variable_count = s.matches("Variable:").count();
+        assert_eq!(variable_count, 3, "Should have exactly 3 Variable lines");
+        assert!(s.ends_with("\r\n\r\n"));
     }
 
     #[test]
