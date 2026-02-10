@@ -102,9 +102,10 @@ async fn post_action(data: web::Data<AppState>, req: web::Json<ActionRequest>) -
     }
 
     let manager = data.manager.lock().await;
+    let req = req.into_inner();
     let action = AmiAction::Custom {
-        action: req.action.clone(),
-        params: req.params.clone().unwrap_or_default().into_iter().collect(),
+        action: req.action,
+        params: req.params.unwrap_or_default().into_iter().collect(),
         action_id: None,
     };
 
