@@ -52,12 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Example 1: Originate with Application (typed variant) ---");
     
     let mut variables = HashMap::new();
-    // Each variable can have multiple values
+    // Each variable can have multiple values in the data structure.
+    // Note: The AMI protocol will send each value as a separate Variable line.
+    // This is mainly useful for programmatically building variable lists.
     variables.insert("CDR(extra_data)".to_string(), vec!["123".to_string()]);
     variables.insert("__ID_EXTRA".to_string(), vec!["456".to_string()]);
     variables.insert("__ID_MAIN".to_string(), vec!["789".to_string()]);
-    // Example of a variable with multiple values
-    variables.insert("TAGS".to_string(), vec!["tag1".to_string(), "tag2".to_string()]);
 
     let originate_action = AmiAction::Originate {
         channel: "PJSIP/user1".to_string(),

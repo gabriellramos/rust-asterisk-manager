@@ -267,7 +267,7 @@ pub enum AmiAction {
 impl Validatable for AmiAction {
     fn validate(&self) -> Result<(), AmiError> {
         match self {
-            AmiAction::Login { username, secret, .. } => {
+            AmiAction::Login { username, secret, action_id, .. } => {
                 if username.is_empty() {
                     return Err(AmiError::ValidationError("Username cannot be empty".to_string()));
                 }
@@ -276,12 +276,18 @@ impl Validatable for AmiAction {
                 }
                 validate_value(username)?;
                 validate_value(secret)?;
+                if let Some(id) = action_id {
+                    validate_value(id)?;
+                }
             }
-            AmiAction::Command { command, .. } => {
+            AmiAction::Command { command, action_id } => {
                 if command.is_empty() {
                     return Err(AmiError::ValidationError("Command cannot be empty".to_string()));
                 }
                 validate_value(command)?;
+                if let Some(id) = action_id {
+                    validate_value(id)?;
+                }
             }
             AmiAction::Originate {
                 channel,
@@ -291,6 +297,7 @@ impl Validatable for AmiAction {
                 context,
                 exten,
                 variables,
+                action_id,
                 ..
             } => {
                 // Validate required field
@@ -325,8 +332,13 @@ impl Validatable for AmiAction {
                         }
                     }
                 }
+                
+                // Validate action_id
+                if let Some(id) = action_id {
+                    validate_value(id)?;
+                }
             }
-            AmiAction::Custom { action, params, .. } => {
+            AmiAction::Custom { action, params, action_id } => {
                 if action.is_empty() {
                     return Err(AmiError::ValidationError("Action name cannot be empty".to_string()));
                 }
@@ -336,9 +348,17 @@ impl Validatable for AmiAction {
                     validate_key(key)?;
                     validate_value(value)?;
                 }
+                
+                // Validate action_id
+                if let Some(id) = action_id {
+                    validate_value(id)?;
+                }
             }
-            AmiAction::Logoff { .. } | AmiAction::Ping { .. } => {
-                // No validation needed for these actions
+            AmiAction::Logoff { action_id } | AmiAction::Ping { action_id } => {
+                // Validate action_id if present
+                if let Some(id) = action_id {
+                    validate_value(id)?;
+                }
             }
         }
         Ok(())
@@ -1363,6 +1383,19 @@ mod tests {
         };
         let result = action.validate();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_tab_allowed_in_value() {
+        let action = AmiAction::Custom {
+            action: "Test".to_string(),
+            params: vec![
+                ("Key".to_string(), "value\twith\ttabs".to_string()),
+            ],
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_ok(), "Tab characters should be allowed in values");
     }
 
     #[test]
