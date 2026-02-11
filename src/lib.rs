@@ -191,6 +191,10 @@ pub enum AmiAction {
     /// - Multiple variable entries with individual values
     /// - Each variable can have multiple values in the Vec
     ///
+    /// Note: The variables HashMap may produce non-deterministic iteration order,
+    /// but this is acceptable as the AMI protocol does not require a specific order
+    /// for Variable parameters.
+    ///
     /// # Example
     /// ```
     /// use asterisk_manager::AmiAction;
@@ -230,6 +234,8 @@ pub enum AmiAction {
         #[serde(skip_serializing_if = "Option::is_none")]
         priority: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        /// Variables to set on the channel. HashMap iteration order is non-deterministic,
+        /// but this is acceptable as AMI does not require specific ordering of Variable parameters.
         variables: Option<HashMap<String, Vec<String>>>,
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
