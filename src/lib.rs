@@ -113,6 +113,36 @@ use uuid::Uuid;
 
 pub mod resilient;
 
+/// Trait for validating AMI actions before transmission.
+pub trait Validatable {
+    /// Validates the action, returning an error if any validation fails.
+    fn validate(&self) -> Result<(), AmiError>;
+}
+
+/// Validates that a key is alphanumeric with underscores or hyphens.
+fn validate_key(key: &str) -> Result<(), AmiError> {
+    if key.is_empty() {
+        return Err(AmiError::ValidationError("Key cannot be empty".to_string()));
+    }
+    if !key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return Err(AmiError::ValidationError(format!(
+            "Key '{}' contains invalid characters. Only alphanumeric, '_', and '-' are allowed",
+            key
+        )));
+    }
+    Ok(())
+}
+
+/// Validates that a value does not contain control characters.
+fn validate_value(value: &str) -> Result<(), AmiError> {
+    if value.chars().any(|c| c.is_control() && c != '\t') {
+        return Err(AmiError::ValidationError(
+            "Value contains invalid control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg_attr(feature = "docs", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmiResponse {
@@ -154,6 +184,56 @@ pub enum AmiAction {
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
+    /// Originate action to generate an outgoing call.
+    ///
+    /// This action allows you to originate a call from the Asterisk server.
+    /// The variables field supports multiple Variable parameters which can be specified as:
+    /// - Multiple variable entries with individual values
+    /// - Each variable can have multiple values in the Vec
+    ///
+    /// # Example
+    /// ```
+    /// use asterisk_manager::AmiAction;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut variables = HashMap::new();
+    /// variables.insert("CDR(extra_data)".to_string(), vec!["123".to_string()]);
+    /// variables.insert("__ID_EXTRA".to_string(), vec!["456".to_string()]);
+    ///
+    /// let action = AmiAction::Originate {
+    ///     channel: "PJSIP/user1".to_string(),
+    ///     application: Some("Dial".to_string()),
+    ///     data: Some("PJSIP/1234@trunk".to_string()),
+    ///     timeout: None,
+    ///     caller_id: None,
+    ///     context: None,
+    ///     exten: None,
+    ///     priority: None,
+    ///     variables: Some(variables),
+    ///     action_id: None,
+    /// };
+    /// ```
+    Originate {
+        channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        application: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caller_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exten: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        priority: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        variables: Option<HashMap<String, Vec<String>>>,
+        #[serde(rename = "ActionID")]
+        action_id: Option<String>,
+    },
     /// Custom action for any AMI action not explicitly defined.
     ///
     /// The `params` field is a `Vec<(String, String)>` to allow duplicate keys,
@@ -182,6 +262,87 @@ pub enum AmiAction {
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
+}
+
+impl Validatable for AmiAction {
+    fn validate(&self) -> Result<(), AmiError> {
+        match self {
+            AmiAction::Login { username, secret, .. } => {
+                if username.is_empty() {
+                    return Err(AmiError::ValidationError("Username cannot be empty".to_string()));
+                }
+                if secret.is_empty() {
+                    return Err(AmiError::ValidationError("Secret cannot be empty".to_string()));
+                }
+                validate_value(username)?;
+                validate_value(secret)?;
+            }
+            AmiAction::Command { command, .. } => {
+                if command.is_empty() {
+                    return Err(AmiError::ValidationError("Command cannot be empty".to_string()));
+                }
+                validate_value(command)?;
+            }
+            AmiAction::Originate {
+                channel,
+                application,
+                data,
+                caller_id,
+                context,
+                exten,
+                variables,
+                ..
+            } => {
+                // Validate required field
+                if channel.is_empty() {
+                    return Err(AmiError::ValidationError("Channel is required for Originate action".to_string()));
+                }
+                validate_value(channel)?;
+
+                // Validate optional fields
+                if let Some(app) = application {
+                    validate_value(app)?;
+                }
+                if let Some(d) = data {
+                    validate_value(d)?;
+                }
+                if let Some(cid) = caller_id {
+                    validate_value(cid)?;
+                }
+                if let Some(ctx) = context {
+                    validate_value(ctx)?;
+                }
+                if let Some(ext) = exten {
+                    validate_value(ext)?;
+                }
+
+                // Validate variables
+                if let Some(vars) = variables {
+                    for (key, values) in vars {
+                        validate_key(key)?;
+                        for value in values {
+                            validate_value(value)?;
+                        }
+                    }
+                }
+            }
+            AmiAction::Custom { action, params, .. } => {
+                if action.is_empty() {
+                    return Err(AmiError::ValidationError("Action name cannot be empty".to_string()));
+                }
+                validate_value(action)?;
+
+                for (key, value) in params {
+                    validate_key(key)?;
+                    validate_value(value)?;
+                }
+            }
+            AmiAction::Logoff { .. } | AmiAction::Ping { .. } => {
+                // No validation needed for these actions
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "docs", derive(ToSchema))]
@@ -325,6 +486,8 @@ pub enum AmiError {
     EventStreamLagged(#[from] tokio::sync::broadcast::error::RecvError),
     #[error("Not connected to AMI server")]
     NotConnected,
+    #[error("Validation error: {0}")]
+    ValidationError(String),
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -433,6 +596,9 @@ impl Manager {
     }
 
     pub async fn send_action(&self, mut action: AmiAction) -> Result<AmiResponse, AmiError> {
+        // Validate the action before sending
+        action.validate()?;
+        
         let action_id = get_or_set_action_id(&mut action);
 
         let mut stream = self.all_events_stream().await;
@@ -829,6 +995,52 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
                 s.push_str(&format!("ActionID: {id}\r\n"));
             }
         }
+        AmiAction::Originate {
+            channel,
+            application,
+            data,
+            timeout,
+            caller_id,
+            context,
+            exten,
+            priority,
+            variables,
+            action_id,
+        } => {
+            s.push_str("Action: Originate\r\n");
+            s.push_str(&format!("Channel: {channel}\r\n"));
+            if let Some(app) = application {
+                s.push_str(&format!("Application: {app}\r\n"));
+            }
+            if let Some(d) = data {
+                s.push_str(&format!("Data: {d}\r\n"));
+            }
+            if let Some(t) = timeout {
+                s.push_str(&format!("Timeout: {t}\r\n"));
+            }
+            if let Some(cid) = caller_id {
+                s.push_str(&format!("CallerID: {cid}\r\n"));
+            }
+            if let Some(ctx) = context {
+                s.push_str(&format!("Context: {ctx}\r\n"));
+            }
+            if let Some(ext) = exten {
+                s.push_str(&format!("Exten: {ext}\r\n"));
+            }
+            if let Some(pri) = priority {
+                s.push_str(&format!("Priority: {pri}\r\n"));
+            }
+            if let Some(vars) = variables {
+                for (key, values) in vars {
+                    for value in values {
+                        s.push_str(&format!("Variable: {key}={value}\r\n"));
+                    }
+                }
+            }
+            if let Some(id) = action_id {
+                s.push_str(&format!("ActionID: {id}\r\n"));
+            }
+        }
         AmiAction::Custom {
             action: action_name,
             params,
@@ -853,6 +1065,7 @@ fn get_or_set_action_id(action: &mut AmiAction) -> String {
         | AmiAction::Logoff { action_id }
         | AmiAction::Ping { action_id }
         | AmiAction::Command { action_id, .. }
+        | AmiAction::Originate { action_id, .. }
         | AmiAction::Custom { action_id, .. } => {
             if let Some(id) = action_id {
                 id.clone()
@@ -945,6 +1158,211 @@ mod tests {
         let variable_count = s.matches("Variable:").count();
         assert_eq!(variable_count, 3, "Should have exactly 3 Variable lines");
         assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_serialize_originate_action() {
+        let mut variables = HashMap::new();
+        variables.insert("CDR(extra_data)".to_string(), vec!["123".to_string()]);
+        variables.insert("__ID_EXTRA".to_string(), vec!["456".to_string()]);
+        variables.insert("__ID_MAIN".to_string(), vec!["789".to_string()]);
+
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: Some("PJSIP/1234@trunk".to_string()),
+            timeout: Some(30000),
+            caller_id: Some("1000".to_string()),
+            context: None,
+            exten: None,
+            priority: None,
+            variables: Some(variables),
+            action_id: Some("test123".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: PJSIP/user1"));
+        assert!(s.contains("Application: Dial"));
+        assert!(s.contains("Data: PJSIP/1234@trunk"));
+        assert!(s.contains("Timeout: 30000"));
+        assert!(s.contains("CallerID: 1000"));
+        assert!(s.contains("Variable: CDR(extra_data)=123"));
+        assert!(s.contains("Variable: __ID_EXTRA=456"));
+        assert!(s.contains("Variable: __ID_MAIN=789"));
+        assert!(s.contains("ActionID: test123"));
+        assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_serialize_originate_action_with_multiple_values_per_variable() {
+        let mut variables = HashMap::new();
+        variables.insert("VAR1".to_string(), vec!["value1".to_string(), "value2".to_string()]);
+
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: Some("PJSIP/1234@trunk".to_string()),
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: Some(variables),
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Variable: VAR1=value1"));
+        assert!(s.contains("Variable: VAR1=value2"));
+        let var1_count = s.matches("Variable: VAR1=").count();
+        assert_eq!(var1_count, 2, "Should have exactly 2 Variable lines for VAR1");
+    }
+
+    #[test]
+    fn test_serialize_originate_with_context() {
+        let action = AmiAction::Originate {
+            channel: "SIP/100".to_string(),
+            application: None,
+            data: None,
+            timeout: None,
+            caller_id: Some("1000".to_string()),
+            context: Some("default".to_string()),
+            exten: Some("200".to_string()),
+            priority: Some(1),
+            variables: None,
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: SIP/100"));
+        assert!(s.contains("CallerID: 1000"));
+        assert!(s.contains("Context: default"));
+        assert!(s.contains("Exten: 200"));
+        assert!(s.contains("Priority: 1"));
+        assert!(!s.contains("Application:"));
+        assert!(!s.contains("Data:"));
+    }
+
+    #[test]
+    fn test_validation_originate_empty_channel() {
+        let action = AmiAction::Originate {
+            channel: "".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Channel is required"));
+    }
+
+    #[test]
+    fn test_validation_originate_valid() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: Some("PJSIP/1234@trunk".to_string()),
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_originate_invalid_variable_key() {
+        let mut variables = HashMap::new();
+        variables.insert("invalid key!".to_string(), vec!["value".to_string()]);
+
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: Some(variables),
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_validation_originate_invalid_variable_value() {
+        let mut variables = HashMap::new();
+        variables.insert("VAR1".to_string(), vec!["value\x00with\x01control".to_string()]);
+
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: Some(variables),
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("control characters"));
+    }
+
+    #[test]
+    fn test_validation_custom_empty_action() {
+        let action = AmiAction::Custom {
+            action: "".to_string(),
+            params: vec![],
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Action name cannot be empty"));
+    }
+
+    #[test]
+    fn test_validation_custom_invalid_key() {
+        let action = AmiAction::Custom {
+            action: "Test".to_string(),
+            params: vec![
+                ("ValidKey".to_string(), "value".to_string()),
+                ("Invalid Key!".to_string(), "value".to_string()),
+            ],
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_validation_custom_valid() {
+        let action = AmiAction::Custom {
+            action: "Test".to_string(),
+            params: vec![
+                ("Key-With-Dash".to_string(), "value1".to_string()),
+                ("Key_With_Underscore".to_string(), "value2".to_string()),
+                ("AlphaNumeric123".to_string(), "value3".to_string()),
+            ],
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_ok());
     }
 
     #[test]
