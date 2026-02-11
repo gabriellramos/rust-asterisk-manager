@@ -195,6 +195,9 @@ pub enum AmiAction {
     /// but this is acceptable as the AMI protocol does not require a specific order
     /// for Variable parameters.
     ///
+    /// For full documentation of all parameters, see:
+    /// <https://docs.asterisk.org/Latest_API/API_Documentation/AMI_Actions/Originate/>
+    ///
     /// # Example
     /// ```
     /// use asterisk_manager::AmiAction;
@@ -214,6 +217,13 @@ pub enum AmiAction {
     ///     exten: None,
     ///     priority: None,
     ///     variables: Some(variables),
+    ///     account: None,
+    ///     early_media: None,
+    ///     async_originate: None,
+    ///     codecs: None,
+    ///     channel_id: None,
+    ///     other_channel_id: None,
+    ///     pre_dial_go_sub: None,
     ///     action_id: None,
     /// };
     /// ```
@@ -237,6 +247,27 @@ pub enum AmiAction {
         /// Variables to set on the channel. HashMap iteration order is non-deterministic,
         /// but this is acceptable as AMI does not require specific ordering of Variable parameters.
         variables: Option<HashMap<String, Vec<String>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Account code for billing/tracking purposes in CDRs.
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Set to true to force call bridge on early media.
+        early_media: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Set to true to originate the call asynchronously.
+        async_originate: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Comma-separated list of codecs to use for the call (e.g., "ulaw,alaw,gsm").
+        codecs: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Channel UniqueId to set on the originated channel.
+        channel_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Channel UniqueId to set on the second channel (for Local channels).
+        other_channel_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// GoSub to execute before dialing, format: "Context,Extension,Priority".
+        pre_dial_go_sub: Option<String>,
         #[serde(rename = "ActionID")]
         action_id: Option<String>,
     },
@@ -303,6 +334,11 @@ impl Validatable for AmiAction {
                 context,
                 exten,
                 variables,
+                account,
+                codecs,
+                channel_id,
+                other_channel_id,
+                pre_dial_go_sub,
                 action_id,
                 ..
             } => {
@@ -336,6 +372,30 @@ impl Validatable for AmiAction {
                         for value in values {
                             validate_value(value)?;
                         }
+                    }
+                }
+
+                // Validate new optional fields
+                if let Some(acc) = account {
+                    validate_value(acc)?;
+                }
+                if let Some(codec_list) = codecs {
+                    validate_value(codec_list)?;
+                }
+                if let Some(ch_id) = channel_id {
+                    validate_value(ch_id)?;
+                }
+                if let Some(other_ch_id) = other_channel_id {
+                    validate_value(other_ch_id)?;
+                }
+                if let Some(gosub) = pre_dial_go_sub {
+                    validate_value(gosub)?;
+                    // PreDialGoSub should be in the format "Context,Extension,Priority"
+                    let parts: Vec<&str> = gosub.split(',').collect();
+                    if parts.len() != 3 {
+                        return Err(AmiError::ValidationError(
+                            "PreDialGoSub must be in format 'Context,Extension,Priority'".to_string()
+                        ));
                     }
                 }
                 
@@ -1031,6 +1091,13 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
             exten,
             priority,
             variables,
+            account,
+            early_media,
+            async_originate,
+            codecs,
+            channel_id,
+            other_channel_id,
+            pre_dial_go_sub,
             action_id,
         } => {
             s.push_str("Action: Originate\r\n");
@@ -1062,6 +1129,27 @@ fn serialize_ami_action(action: &AmiAction) -> Result<String, AmiError> {
                         s.push_str(&format!("Variable: {key}={value}\r\n"));
                     }
                 }
+            }
+            if let Some(acc) = account {
+                s.push_str(&format!("Account: {acc}\r\n"));
+            }
+            if let Some(em) = early_media {
+                s.push_str(&format!("EarlyMedia: {}\r\n", if *em { "true" } else { "false" }));
+            }
+            if let Some(async_val) = async_originate {
+                s.push_str(&format!("Async: {}\r\n", if *async_val { "true" } else { "false" }));
+            }
+            if let Some(codec_list) = codecs {
+                s.push_str(&format!("Codecs: {codec_list}\r\n"));
+            }
+            if let Some(ch_id) = channel_id {
+                s.push_str(&format!("ChannelId: {ch_id}\r\n"));
+            }
+            if let Some(other_ch_id) = other_channel_id {
+                s.push_str(&format!("OtherChannelId: {other_ch_id}\r\n"));
+            }
+            if let Some(gosub) = pre_dial_go_sub {
+                s.push_str(&format!("PreDialGoSub: {gosub}\r\n"));
             }
             if let Some(id) = action_id {
                 s.push_str(&format!("ActionID: {id}\r\n"));
@@ -1203,6 +1291,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: Some(variables),
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: Some("test123".to_string()),
         };
         let s = serialize_ami_action(&action).unwrap();
@@ -1234,6 +1329,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: Some(variables),
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let s = serialize_ami_action(&action).unwrap();
@@ -1255,6 +1357,13 @@ mod tests {
             exten: Some("200".to_string()),
             priority: Some(1),
             variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let s = serialize_ami_action(&action).unwrap();
@@ -1280,6 +1389,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let result = action.validate();
@@ -1299,6 +1415,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let result = action.validate();
@@ -1320,6 +1443,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: Some(variables),
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let result = action.validate();
@@ -1342,6 +1472,13 @@ mod tests {
             exten: None,
             priority: None,
             variables: Some(variables),
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
             action_id: None,
         };
         let result = action.validate();
@@ -1767,5 +1904,251 @@ mod tests {
             }
             _ => panic!("Expected UnknownEvent with ContactStatus, got {:?}", deserialized),
         }
+    }
+
+    // Tests for new Originate action fields
+
+    #[test]
+    fn test_serialize_originate_with_all_new_fields() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: Some("PJSIP/1234@trunk".to_string()),
+            timeout: Some(30000),
+            caller_id: Some("1000".to_string()),
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: Some("billing123".to_string()),
+            early_media: Some(true),
+            async_originate: Some(true),
+            codecs: Some("ulaw,alaw,gsm".to_string()),
+            channel_id: Some("MyCustomChannelID".to_string()),
+            other_channel_id: Some("MyOtherChannelID".to_string()),
+            pre_dial_go_sub: Some("preDialContext,myGoSub,1".to_string()),
+            action_id: Some("test123".to_string()),
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Action: Originate"));
+        assert!(s.contains("Channel: PJSIP/user1"));
+        assert!(s.contains("Account: billing123"));
+        assert!(s.contains("EarlyMedia: true"));
+        assert!(s.contains("Async: true"));
+        assert!(s.contains("Codecs: ulaw,alaw,gsm"));
+        assert!(s.contains("ChannelId: MyCustomChannelID"));
+        assert!(s.contains("OtherChannelId: MyOtherChannelID"));
+        assert!(s.contains("PreDialGoSub: preDialContext,myGoSub,1"));
+        assert!(s.contains("ActionID: test123"));
+        assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_serialize_originate_early_media_false() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: None,
+            early_media: Some(false),
+            async_originate: Some(false),
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("EarlyMedia: false"));
+        assert!(s.contains("Async: false"));
+    }
+
+    #[test]
+    fn test_validation_originate_valid_with_new_fields() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: Some("PJSIP/1234@trunk".to_string()),
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: Some("billing123".to_string()),
+            early_media: Some(true),
+            async_originate: Some(true),
+            codecs: Some("ulaw,alaw".to_string()),
+            channel_id: Some("MyCustomID".to_string()),
+            other_channel_id: Some("MyOtherID".to_string()),
+            pre_dial_go_sub: Some("preDialContext,myGoSub,1".to_string()),
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_originate_invalid_pre_dial_go_sub_format() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: Some("invalid_format".to_string()), // Missing comma separators
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("PreDialGoSub must be in format 'Context,Extension,Priority'"));
+    }
+
+    #[test]
+    fn test_validation_originate_invalid_pre_dial_go_sub_too_many_parts() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: Some("context,ext,pri,extra".to_string()), // Too many parts
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("PreDialGoSub must be in format 'Context,Extension,Priority'"));
+    }
+
+    #[test]
+    fn test_validation_originate_invalid_account_with_control_chars() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: Some("account\x00with\x01control".to_string()),
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("control characters"));
+    }
+
+    #[test]
+    fn test_serialize_originate_account_only() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: Some("projectX".to_string()),
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Account: projectX"));
+        assert!(!s.contains("EarlyMedia:"));
+        assert!(!s.contains("Codecs:"));
+        assert!(!s.contains("ChannelId:"));
+    }
+
+    #[test]
+    fn test_serialize_originate_codecs_only() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: Some("g729,ulaw".to_string()),
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: None,
+            action_id: None,
+        };
+        let s = serialize_ami_action(&action).unwrap();
+        assert!(s.contains("Codecs: g729,ulaw"));
+        assert!(!s.contains("Account:"));
+        assert!(!s.contains("EarlyMedia:"));
+    }
+
+    #[test]
+    fn test_validation_originate_with_pre_dial_go_sub_with_args() {
+        let action = AmiAction::Originate {
+            channel: "PJSIP/user1".to_string(),
+            application: Some("Dial".to_string()),
+            data: None,
+            timeout: None,
+            caller_id: None,
+            context: None,
+            exten: None,
+            priority: None,
+            variables: None,
+            account: None,
+            early_media: None,
+            async_originate: None,
+            codecs: None,
+            channel_id: None,
+            other_channel_id: None,
+            pre_dial_go_sub: Some("mycontext,s,1".to_string()),
+            action_id: None,
+        };
+        let result = action.validate();
+        assert!(result.is_ok());
     }
 }
