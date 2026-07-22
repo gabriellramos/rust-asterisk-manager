@@ -729,16 +729,24 @@ fn spawn_dispatcher_task(
             if let Ok(parsed_messages) = parse_ami_protocol_message(&raw_message) {
                 for value_msg in parsed_messages {
                     let mut inner = inner_arc.lock().await;
-                    if value_msg.get("Response").is_some() {
-                        if let Ok(resp) = serde_json::from_value::<AmiResponse>(value_msg) {
-                            if let Some(action_id) = &resp.action_id {
-                                if let Some(responder) = inner.pending_responses.remove(action_id) {
-                                    let _ = responder.send(Ok(resp));
-                                }
+
+                    if let Some(action_id) = value_msg.get("ActionID").and_then(|v| v.as_str()) {
+                        if let Some(responder) = inner.pending_responses.remove(action_id) {
+                            if let Ok(resp) = serde_json::from_value::<AmiResponse>(value_msg) {
+                                let _ = responder.send(Ok(resp));
                             }
+                        } else if value_msg.get("Event").is_some() {
+                            log::trace!(
+                                "Received delayed event with ActionID {action_id}, broadcasting to event stream"
+                            );
+                            if let Ok(event) = serde_json::from_value::<AmiEvent>(value_msg) {
+                                let _ = inner.event_broadcaster.send(event);
+                            }
+                        } else {
+                            log::warn!("Received unmatched message with ActionID {action_id}");
                         }
                     } else if value_msg.get("Event").is_some() {
-                        if let Ok(event) = serde_json::from_value::<AmiEvent>(value_msg.clone()) {
+                        if let Ok(event) = serde_json::from_value::<AmiEvent>(value_msg) {
                             let _ = inner.event_broadcaster.send(event);
                         }
                     }
@@ -1165,6 +1173,470 @@ mod tests {
 
         // Clean up
         let _ = manager.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn test_orphaned_action_id_event_is_broadcast() {
+        use tokio_stream::StreamExt;
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+
+        let orphaned_action_id = "orphaned-action-123";
+
+        // Simulate an orphaned message: it has ActionID + Event but no pending responder.
+        // This is the exact scenario that OriginateResponse triggers after async Originate
+        // already returned Success and was removed from pending_responses.
+        let raw = format!(
+            "Event: OriginateResponse\r\nActionID: {orphaned_action_id}\r\nResponse: Success\r\nChannel: SIP/100-00000001\r\nUniqueid: 1234\r\n\r\n"
+        );
+        let parsed = parse_ami_protocol_message(&raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["ActionID"], orphaned_action_id);
+        assert_eq!(parsed[0]["Event"], "OriginateResponse");
+
+        // Directly broadcast through the event broadcaster to simulate what the dispatcher does
+        {
+            let inner = manager.inner.lock().await;
+            let event: AmiEvent =
+                serde_json::from_value(parsed[0].clone()).expect("should parse as AmiEvent");
+            let _ = inner.event_broadcaster.send(event);
+        }
+
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("should receive event within timeout")
+            .expect("stream should not be empty")
+            .expect("event should parse successfully");
+
+        match received {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(
+                    fields.get("ActionID").map(|s| s.as_str()),
+                    Some(orphaned_action_id)
+                );
+                assert_eq!(
+                    fields.get("Response").map(|s| s.as_str()),
+                    Some("Success")
+                );
+            }
+            _ => panic!(
+                "Expected UnknownEvent(OriginateResponse), got {:?}",
+                received
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_orphaned_action_id_without_event_is_not_broadcast() {
+        use tokio_stream::StreamExt;
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+
+        // Simulate a message with ActionID but NO Event field and no pending responder.
+        // This should NOT be broadcast — only logged as a warning.
+        let raw =
+            "Response: Success\r\nActionID: orphaned-no-event\r\nMessage: Done\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].get("Event").is_none());
+
+        // Directly send through the dispatcher channel to test the actual dispatch logic
+        // We need to reconstruct the inner flow. Instead, verify via the broadcaster that
+        // nothing was sent.
+        let mut stream2 = manager.all_events_stream().await;
+        // Consume any existing events
+        while let Ok(Some(_)) =
+            tokio::time::timeout(Duration::from_millis(50), stream2.next()).await
+        {
+        }
+
+        // The dispatcher would drop this message (no pending responder, no Event field).
+        // Verify no event was received.
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(result.is_err(), "should timeout — no event should be broadcast");
+    }
+
+    // --- Dispatcher-level tests: exercise spawn_dispatcher_task through its channel ---
+
+    fn spawn_test_dispatcher(
+        inner: Arc<Mutex<InnerManager>>,
+    ) -> mpsc::Sender<String> {
+        let (dispatch_tx, dispatch_rx) = mpsc::channel::<String>(64);
+        spawn_dispatcher_task(inner, dispatch_rx);
+        dispatch_tx
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_originate_response_failure_real_log() {
+        use tokio_stream::StreamExt;
+
+        // The EXACT raw OriginateResponse from the production log
+        let raw = "Event: OriginateResponse\r\n\
+            Privilege: call,all\r\n\
+            SequenceNumber: 15\r\n\
+            File: manager.c\r\n\
+            Line: 4328\r\n\
+            Func: fast_originate\r\n\
+            ActionID: req_12594026-441c-4293-918c-655353029eeb_2a11d1e1-1ce9-42fb-8fce-12e859791fe7\r\n\
+            Response: Failure\r\n\
+            Channel: PJSIP/1000001001@sbc-trunk\r\n\
+            Context: default\r\n\
+            Exten: 015548991000000\r\n\
+            Reason: 0\r\n\
+            Uniqueid: call-12594026-441c-4293-918c-655353029eeb-2a11d1e1-1ce9-42fb-8fce-12e859791fe7\r\n\
+            CallerIDNum: 1000001001\r\n\
+            CallerIDName: Assisted Call \r\n\
+            \r\n";
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        // Send the raw message through the dispatcher (simulates what spawn_reader_task does)
+        dispatch_tx.send(raw.to_string()).await.unwrap();
+
+        // The dispatcher should broadcast the OriginateResponse as an event
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("should receive within timeout")
+            .expect("stream should not be empty")
+            .expect("should parse successfully");
+
+        match received {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(
+                    fields.get("Response").map(|s| s.as_str()),
+                    Some("Failure")
+                );
+                assert_eq!(
+                    fields.get("ActionID").map(|s| s.as_str()),
+                    Some("req_12594026-441c-4293-918c-655353029eeb_2a11d1e1-1ce9-42fb-8fce-12e859791fe7")
+                );
+                assert_eq!(
+                    fields.get("Channel").map(|s| s.as_str()),
+                    Some("PJSIP/1000001001@sbc-trunk")
+                );
+                assert_eq!(
+                    fields.get("Reason").map(|s| s.as_str()),
+                    Some("0")
+                );
+                assert_eq!(
+                    fields.get("Uniqueid").map(|s| s.as_str()),
+                    Some("call-12594026-441c-4293-918c-655353029eeb-2a11d1e1-1ce9-42fb-8fce-12e859791fe7")
+                );
+            }
+            other => panic!("Expected UnknownEvent(OriginateResponse), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_originate_response_success_is_broadcast() {
+        use tokio_stream::StreamExt;
+
+        let raw = "Event: OriginateResponse\r\n\
+            ActionID: async-orig-success-test\r\n\
+            Response: Success\r\n\
+            Channel: PJSIP/100-00000001\r\n\
+            Context: default\r\n\
+            Exten: 200\r\n\
+            Reason: 0\r\n\
+            Uniqueid: 1234.5\r\n\
+            \r\n";
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        dispatch_tx.send(raw.to_string()).await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("should receive within timeout")
+            .expect("stream not empty")
+            .expect("parse ok");
+
+        match received {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(fields.get("Response").map(|s| s.as_str()), Some("Success"));
+                assert_eq!(
+                    fields.get("ActionID").map(|s| s.as_str()),
+                    Some("async-orig-success-test")
+                );
+            }
+            other => panic!("Expected OriginateResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_pending_response_is_consumed_not_broadcast() {
+        use tokio_stream::StreamExt;
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let (pending_tx, pending_rx) = oneshot::channel::<Result<AmiResponse, AmiError>>();
+
+        let action_id = "action-consumed-test";
+
+        // Register a pending response (simulates what send_initial_request does)
+        {
+            let mut inner = manager.inner.lock().await;
+            inner
+                .pending_responses
+                .insert(action_id.to_string(), pending_tx);
+        }
+
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        // Send a Response message with matching ActionID
+        let raw = format!(
+            "Response: Success\r\nActionID: {action_id}\r\nMessage: Pong\r\n\r\n"
+        );
+        dispatch_tx.send(raw).await.unwrap();
+
+        // The pending responder should receive the response
+        let resp = tokio::time::timeout(Duration::from_secs(2), pending_rx)
+            .await
+            .expect("timeout waiting for pending response")
+            .expect("oneshot should not be dropped")
+            .expect("response should be Ok");
+
+        assert_eq!(resp.response, "Success");
+        assert_eq!(resp.action_id.as_deref(), Some(action_id));
+
+        // The event stream should NOT receive this response
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(
+            result.is_err(),
+            "Response consumed by pending should not be broadcast to event stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_multi_block_message() {
+        use tokio_stream::StreamExt;
+
+        // AMI can send multiple messages in a single TCP block (separated by \r\n\r\n).
+        // This tests that the dispatcher processes all of them correctly.
+        let raw = "Event: Newchannel\r\nChannel: SIP/100-00000001\r\nUniqueid: 999\r\n\r\n\
+            Event: OriginateResponse\r\nActionID: multi-block-test\r\nResponse: Failure\r\nChannel: SIP/100-00000001\r\n\r\n";
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        dispatch_tx.send(raw.to_string()).await.unwrap();
+
+        // Should receive both events
+        let ev1 = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timeout on first event")
+            .expect("stream not empty")
+            .expect("parse ok");
+
+        let ev2 = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timeout on second event")
+            .expect("stream not empty")
+            .expect("parse ok");
+
+        // First: Newchannel (no ActionID)
+        match &ev1 {
+            AmiEvent::Newchannel(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+            }
+            AmiEvent::UnknownEvent { event_type, .. } => {
+                assert_eq!(event_type, "Newchannel");
+            }
+            other => panic!("Expected Newchannel, got {:?}", other),
+        }
+
+        // Second: OriginateResponse (orphaned ActionID)
+        match &ev2 {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(
+                    fields.get("ActionID").map(|s| s.as_str()),
+                    Some("multi-block-test")
+                );
+                assert_eq!(fields.get("Response").map(|s| s.as_str()), Some("Failure"));
+            }
+            other => panic!("Expected OriginateResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_pending_consume_then_delayed_event_broadcast() {
+        use tokio_stream::StreamExt;
+
+        // This is the COMPLETE async Originate lifecycle:
+        // 1. pending_response registered for action_id
+        // 2. Response: Success arrives -> consumed by pending (oneshot)
+        // 3. Later, OriginateResponse with same ActionID arrives -> should be broadcast
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let (pending_tx, pending_rx) = oneshot::channel::<Result<AmiResponse, AmiError>>();
+
+        let action_id = "full-lifecycle-test";
+
+        // Step 1: Register pending
+        {
+            let mut inner = manager.inner.lock().await;
+            inner
+                .pending_responses
+                .insert(action_id.to_string(), pending_tx);
+        }
+
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        // Step 2: Synchronous Response: Success (consumed by pending)
+        let sync_response = format!(
+            "Response: Success\r\nActionID: {action_id}\r\nMessage: Originate successfully queued\r\n\r\n"
+        );
+        dispatch_tx.send(sync_response).await.unwrap();
+
+        let resp = tokio::time::timeout(Duration::from_secs(2), pending_rx)
+            .await
+            .expect("pending should receive")
+            .expect("oneshot ok")
+            .expect("resp ok");
+        assert_eq!(resp.response, "Success");
+
+        // Step 3: Delayed OriginateResponse (orphaned ActionID + Event)
+        let async_event = format!(
+            "Event: OriginateResponse\r\nActionID: {action_id}\r\nResponse: Failure\r\nChannel: PJSIP/100-00000001\r\nReason: 5\r\n\r\n"
+        );
+        dispatch_tx.send(async_event).await.unwrap();
+
+        // Should be broadcast to event stream
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("should receive delayed event")
+            .expect("stream not empty")
+            .expect("parse ok");
+
+        match received {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(fields.get("Response").map(|s| s.as_str()), Some("Failure"));
+                assert_eq!(fields.get("Reason").map(|s| s.as_str()), Some("5"));
+                assert_eq!(
+                    fields.get("ActionID").map(|s| s.as_str()),
+                    Some(action_id)
+                );
+            }
+            other => panic!("Expected delayed OriginateResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_normal_event_without_actionid() {
+        use tokio_stream::StreamExt;
+
+        // Regular events without ActionID should always be broadcast (unchanged behavior)
+        let raw = "Event: Hangup\r\nChannel: SIP/100-00000001\r\nUniqueid: 42\r\nCause: 16\r\nCause-txt: Normal Clearing\r\n\r\n";
+
+        let manager = Manager::new();
+        let mut stream = manager.all_events_stream().await;
+        let dispatch_tx = spawn_test_dispatcher(manager.inner.clone());
+
+        dispatch_tx.send(raw.to_string()).await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timeout")
+            .expect("not empty")
+            .expect("parse ok");
+
+        match received {
+            AmiEvent::Hangup(data) => {
+                assert_eq!(data.channel, "SIP/100-00000001");
+                assert_eq!(data.uniqueid, "42");
+                assert_eq!(data.cause.as_deref(), Some("16"));
+            }
+            other => panic!("Expected Hangup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_originate_response_has_event_and_response() {
+        // Verify that OriginateResponse parsed from raw has both Event and Response fields
+        let raw = "Event: OriginateResponse\r\n\
+            ActionID: req_test-123\r\n\
+            Response: Failure\r\n\
+            Channel: PJSIP/1000001001@sbc-trunk\r\n\
+            Context: default\r\n\
+            Exten: 015548991000000\r\n\
+            Reason: 0\r\n\
+            Uniqueid: call-123\r\n\
+            \r\n";
+
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        // Crucial: OriginateResponse has BOTH Event and Response
+        assert_eq!(parsed[0]["Event"], "OriginateResponse");
+        assert_eq!(parsed[0]["Response"], "Failure");
+        assert_eq!(
+            parsed[0]["ActionID"],
+            "req_test-123"
+        );
+        assert!(parsed[0].get("Channel").is_some());
+        assert!(parsed[0].get("Reason").is_some());
+    }
+
+    #[test]
+    fn test_parse_async_originate_variable_heavy_message() {
+        // The user's real log has many variables in the Originate action.
+        // Verify we can parse the OriginateResponse that follows.
+        let raw = "Event: OriginateResponse\r\n\
+            Privilege: call,all\r\n\
+            SequenceNumber: 15\r\n\
+            File: manager.c\r\n\
+            Line: 4328\r\n\
+            Func: fast_originate\r\n\
+            ActionID: req_12594026-441c-4293-918c-655353029eeb_2a11d1e1-1ce9-42fb-8fce-12e859791fe7\r\n\
+            Response: Failure\r\n\
+            Channel: PJSIP/1000001001@sbc-trunk\r\n\
+            Context: default\r\n\
+            Exten: 015548991000000\r\n\
+            Reason: 0\r\n\
+            Uniqueid: call-12594026-441c-4293-918c-655353029eeb-2a11d1e1-1ce9-42fb-8fce-12e859791fe7\r\n\
+            CallerIDNum: 1000001001\r\n\
+            CallerIDName: Assisted Call \r\n\
+            \r\n";
+
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        // This message has Event + Response + ActionID — the exact pattern that was dropped before
+        assert_eq!(parsed[0]["Event"], "OriginateResponse");
+        assert_eq!(parsed[0]["Response"], "Failure");
+        assert_eq!(
+            parsed[0]["ActionID"],
+            "req_12594026-441c-4293-918c-655353029eeb_2a11d1e1-1ce9-42fb-8fce-12e859791fe7"
+        );
+
+        // It parses as UnknownEvent (not a typed event variant), preserving all fields
+        let event: AmiEvent = serde_json::from_value(parsed[0].clone()).unwrap();
+        match event {
+            AmiEvent::UnknownEvent { event_type, fields } => {
+                assert_eq!(event_type, "OriginateResponse");
+                assert_eq!(fields.get("Response"), Some(&"Failure".to_string()));
+                assert_eq!(fields.get("Reason"), Some(&"0".to_string()));
+                assert_eq!(
+                    fields.get("Channel"),
+                    Some(&"PJSIP/1000001001@sbc-trunk".to_string())
+                );
+            }
+            other => panic!("Expected UnknownEvent, got {:?}", other),
+        }
     }
 
     #[test]

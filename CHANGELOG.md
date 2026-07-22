@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-07-22
+
+### Fixed
+
+-   **Orphaned ActionID events silently dropped**: The dispatcher now correctly routes async AMI events (e.g. `OriginateResponse`) that carry an `ActionID` no longer present in `pending_responses`. Previously, when an `Originate` with `async: true` returned `Response: Success` synchronously and was removed from the pending map, the subsequent `Event: OriginateResponse` (which also carries `ActionID` + `Response`) would hit the `Response` branch, fail to find the ActionID, and be silently discarded. The dispatch logic now checks for an `Event` field on orphaned ActionID messages and broadcasts them to `all_events_stream()`. This fix applies to any async AMI event that arrives after its synchronous response has already been consumed.
+
+---
+
 ## [2.1.1] - 2025-11-18
 
 ### Fixed
