@@ -691,8 +691,8 @@ fn spawn_reader_task(
         loop {
             let mut message_block = String::new();
             loop {
-                let mut line = String::new();
-                match buf_reader.read_line(&mut line).await {
+                let mut line_bytes = Vec::new();
+                match buf_reader.read_until(b'\n', &mut line_bytes).await {
                     Ok(0) => {
                         log::warn!(
                             "AMI connection lost during read: EOF from server (server closed the connection)"
@@ -712,7 +712,8 @@ fn spawn_reader_task(
                         return;
                     }
                     Ok(_) => {
-                        let is_end = line == "\r\n";
+                        let line = String::from_utf8_lossy(&line_bytes);
+                        let is_end = line.as_bytes() == b"\r\n";
                         message_block.push_str(&line);
                         if is_end {
                             break;
@@ -1723,6 +1724,74 @@ mod tests {
                 assert_eq!(deserialized_fields.get("Event"), Some(&"ContactStatus".to_string()));
             }
             _ => panic!("Expected UnknownEvent with ContactStatus, got {:?}", deserialized),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reader_survives_invalid_utf8_bytes() {
+        // Reproduces the production bug: Asterisk emitted a Newexten event whose
+        // Application field contained invalid UTF-8 bytes. The reader must NOT
+        // kill the connection on a single corrupt line (lossy-decode and keep
+        // reading), so the Hangup tail that follows is still delivered.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let (read_half, _write_half) = client.into_split();
+
+        let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<String>(16);
+        let (event_tx, mut event_rx) = broadcast::channel::<AmiEvent>(16);
+
+        spawn_reader_task(read_half, dispatch_tx, event_tx);
+
+        let mut block = Vec::new();
+        block.extend_from_slice(b"Event: Newexten\r\n");
+        block.extend_from_slice(b"Channel: SIP/1001-00000001\r\n");
+        block.extend_from_slice(b"Exten: h\r\n");
+        block.extend_from_slice(b"Priority: 2\r\n");
+        block.extend_from_slice(b"Application: N\x16\x81\xf7i2\x7f\r\n");
+        block.extend_from_slice(b"\r\n");
+        block.extend_from_slice(b"Event: Hangup\r\n");
+        block.extend_from_slice(b"Channel: SIP/1001-00000001\r\n");
+        block.extend_from_slice(b"Uniqueid: 1723653000.1\r\n");
+        block.extend_from_slice(b"Context: from-internal\r\n");
+        block.extend_from_slice(b"Exten: 1002\r\n");
+        block.extend_from_slice(b"Cause: 20\r\n");
+        block.extend_from_slice(b"Cause-txt: Subscriber absent\r\n");
+        block.extend_from_slice(b"\r\n");
+
+        server.write_all(&block).await.unwrap();
+        server.shutdown().await.unwrap();
+
+        // First block: the corrupt Newexten, lossy-decoded (invalid bytes -> U+FFFD).
+        let first = timeout(Duration::from_secs(2), dispatch_rx.recv())
+            .await
+            .expect("reader should deliver the corrupt block")
+            .expect("block should be sent");
+        assert!(first.contains("Event: Newexten"));
+        assert!(first.contains('\u{fffd}'), "corrupt bytes must be lossy-decoded");
+
+        // Second block: the Hangup that immediately followed in the stream must
+        // still be delivered -- this is the event the bug was dropping.
+        let second = timeout(Duration::from_secs(2), dispatch_rx.recv())
+            .await
+            .expect("reader should keep reading after the corrupt line")
+            .expect("hangup block should be sent");
+        assert!(second.contains("Event: Hangup"));
+        assert!(second.contains("Cause-txt: Subscriber absent"));
+
+        // EOF after the tail is expected (clean shutdown), not a premature drop.
+        let lost = timeout(Duration::from_secs(2), event_rx.recv()).await;
+        match lost {
+            Ok(Ok(AmiEvent::InternalConnectionLost { error })) => {
+                assert!(
+                    error.contains("EOF"),
+                    "expected EOF connection lost after clean shutdown, got: {error}"
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {}
+            Err(_) => panic!("expected EOF connection lost after shutdown"),
         }
     }
 }
