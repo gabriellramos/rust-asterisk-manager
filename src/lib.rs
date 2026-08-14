@@ -693,10 +693,21 @@ fn spawn_reader_task(
             loop {
                 let mut line = String::new();
                 match buf_reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => {
-                        // Connection lost - emit synthetic event
+                    Ok(0) => {
+                        log::warn!(
+                            "AMI connection lost during read: EOF from server (server closed the connection)"
+                        );
                         let _ = event_broadcaster.send(AmiEvent::InternalConnectionLost {
-                            error: "Connection lost during read".to_string(),
+                            error: "Connection lost during read (EOF from server)".to_string(),
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "AMI connection lost during read: I/O error reading event stream: {e}"
+                        );
+                        let _ = event_broadcaster.send(AmiEvent::InternalConnectionLost {
+                            error: format!("Connection lost during read (I/O error: {e})"),
                         });
                         return;
                     }
@@ -711,6 +722,7 @@ fn spawn_reader_task(
             }
 
             if !message_block.trim().is_empty() && dispatch_tx.send(message_block).await.is_err() {
+                log::warn!("AMI connection lost: dispatcher channel closed (dispatcher task is no longer receiving)");
                 let _ = event_broadcaster.send(AmiEvent::InternalConnectionLost {
                     error: "Dispatcher channel closed".to_string(),
                 });
