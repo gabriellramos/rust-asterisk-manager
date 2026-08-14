@@ -246,7 +246,8 @@ fn create_infinite_stream(
                         retry_count = 0;
 
                         // Check for internal connection lost events
-                        if let AmiEvent::InternalConnectionLost { .. } = &event {
+                        if let AmiEvent::InternalConnectionLost { error } = &event {
+                            log::warn!("[{stream_id}] AMI connection lost: {error}");
                             // Record connection lost event in metrics if available
                             if let Some(ref metrics) = options.metrics {
                                 metrics.record_connection_lost();
