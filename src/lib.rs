@@ -92,6 +92,8 @@
 //!
 //! MIT
 
+#![allow(clippy::result_large_err)]
+
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,7 +116,7 @@ use uuid::Uuid;
 pub mod resilient;
 
 #[cfg_attr(feature = "docs", derive(ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AmiResponse {
     #[serde(rename = "Response")]
     pub response: String,
@@ -124,9 +126,62 @@ pub struct AmiResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "Message")]
     pub message: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_output: Option<Vec<String>>,
     #[serde(flatten)]
     #[cfg_attr(feature = "docs", schema(additional_properties = true))]
     pub fields: HashMap<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for AmiResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut map: HashMap<String, Value> = HashMap::deserialize(deserializer)?;
+
+        let response = map
+            .get("Response")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let action_id = map.get("ActionID").and_then(|v| v.as_str()).map(String::from);
+
+        let message = map.get("Message").and_then(|v| v.as_str()).map(String::from);
+
+        let command_output = map.get("Output").and_then(|v| match v {
+            Value::Array(arr) => Some(
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+            ),
+            Value::String(s) => Some(vec![s.clone()]),
+            _ => None,
+        });
+
+        // Backwards compatibility: keep "Output" as last value String in fields
+        if let Some(Value::Array(arr)) = map.get("Output") {
+            if let Some(last) = arr.last() {
+                map.insert("Output".to_string(), last.clone());
+            }
+        }
+
+        let skip_keys: &[&str] = &["Response", "ActionID", "Message"];
+        let fields: HashMap<String, Value> = map
+            .into_iter()
+            .filter(|(k, _)| !skip_keys.contains(&k.as_str()))
+            .collect();
+
+        Ok(AmiResponse {
+            response,
+            action_id,
+            message,
+            command_output,
+            fields,
+        })
+    }
 }
 
 #[cfg_attr(feature = "docs", derive(ToSchema))]
@@ -455,6 +510,7 @@ impl Manager {
                 response: initial_response.response,
                 action_id: initial_response.action_id,
                 message: Some("Successfully collected events.".to_string()),
+                command_output: None,
                 fields: final_fields,
             })
         } else {
@@ -778,10 +834,18 @@ fn parse_ami_protocol_message(raw_data: &str) -> Result<Vec<serde_json::Value>, 
         let mut map = serde_json::Map::new();
         for line in block.lines() {
             if let Some((key, value)) = line.split_once(": ") {
-                map.insert(
-                    key.trim().to_string(),
-                    serde_json::Value::String(value.trim().to_string()),
-                );
+                let key = key.trim().to_string();
+                let val = serde_json::Value::String(value.trim().to_string());
+                match map.get_mut(&key) {
+                    Some(serde_json::Value::Array(arr)) => arr.push(val),
+                    Some(existing) => {
+                        let prev = std::mem::replace(existing, serde_json::Value::Null);
+                        *existing = serde_json::Value::Array(vec![prev, val]);
+                    }
+                    None => {
+                        map.insert(key, val);
+                    }
+                }
             }
         }
         if !map.is_empty() {
@@ -917,6 +981,51 @@ mod tests {
         assert_eq!(resp.response, "Success");
         assert_eq!(resp.action_id.as_deref(), Some("123"));
         assert_eq!(resp.message.as_deref(), Some("Authentication accepted"));
+    }
+
+    #[test]
+    fn test_parse_command_response_multi_output() {
+        let raw = "Response: Success\r\nActionID: cmd-1\r\nOutput: Context:  demo\r\nOutput:   => 1.   NoOp(Test)\r\nOutput:   => 2.   Goto(default,s,1)\r\nOutput: -= 2 extensions (2 priorities) in 1 context. =-\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        let resp: AmiResponse = serde_json::from_value(parsed[0].clone()).unwrap();
+        assert_eq!(resp.response, "Success");
+        assert_eq!(resp.action_id.as_deref(), Some("cmd-1"));
+        assert!(resp.command_output.is_some());
+
+        let output = resp.command_output.unwrap();
+        assert_eq!(output.len(), 4);
+        assert_eq!(output[0], "Context:  demo");
+        assert_eq!(output[1], "=> 1.   NoOp(Test)");
+        assert_eq!(output[2], "=> 2.   Goto(default,s,1)");
+        assert_eq!(output[3], "-= 2 extensions (2 priorities) in 1 context. =-");
+    }
+
+    #[test]
+    fn test_parse_command_response_single_output() {
+        let raw = "Response: Success\r\nActionID: cmd-2\r\nOutput: Channel\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let resp: AmiResponse = serde_json::from_value(parsed[0].clone()).unwrap();
+
+        let output = resp.command_output.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0], "Channel");
+    }
+
+    #[test]
+    fn test_fields_output_backwards_compat() {
+        let raw = "Response: Success\r\nActionID: cmd-3\r\nOutput: Line 1\r\nOutput: Line 2\r\nOutput: Line 3\r\n\r\n";
+        let parsed = parse_ami_protocol_message(raw).unwrap();
+        let resp: AmiResponse = serde_json::from_value(parsed[0].clone()).unwrap();
+
+        // command_output has all lines
+        assert_eq!(resp.command_output.as_ref().unwrap().len(), 3);
+
+        // fields["Output"] has the LAST line as String (backwards compat)
+        let output_field = resp.fields.get("Output").unwrap();
+        assert!(output_field.is_string());
+        assert_eq!(output_field.as_str().unwrap(), "Line 3");
     }
 
     #[test]

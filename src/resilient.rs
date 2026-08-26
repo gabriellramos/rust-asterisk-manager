@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Resilient AMI connection module
 //!
 //! This module provides resilient connection management for Asterisk AMI,
