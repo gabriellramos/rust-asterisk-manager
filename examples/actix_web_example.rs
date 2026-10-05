@@ -47,7 +47,7 @@ async fn get_events(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(&*events)
 }
 
-async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> {
+async fn ensure_manager_connected(app_state: &AppState) -> Result<(), Box<AmiError>> {
     let mut attempts = 0;
     loop {
         let mut manager_guard = app_state.manager.lock().await;
@@ -80,7 +80,7 @@ async fn ensure_manager_connected(app_state: &AppState) -> Result<(), AmiError> 
                         continue;
                     }
                     _ => {
-                        return Err(e);
+                        return Err(Box::new(e));
                     }
                 }
             }
