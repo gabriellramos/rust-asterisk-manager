@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] - 2026-10-05
+
+### Fixed
+
+-   **Connection crash on invalid UTF-8 in AMI events**: The reader used `BufReader::read_line` on a `String`, which fails with `InvalidData` whenever Asterisk emits a non-UTF-8 byte in an event field (e.g. a corrupted `Application` value during an `h`-exten). That failure was treated as a fatal I/O error, tearing down the connection and dropping the rest of the block — including the `Hangup` event that closes the call. Lines are now read as raw bytes (`read_until(b'\n')`) and decoded lossily, so a single corrupt line no longer kills the stream; real socket I/O errors remain fatal.
+-   **Duplicate AMI keys silently overwritten**: The protocol parser kept only the last value when an event/response repeated a key (e.g. multiple `Output:` lines from a `Command` action like `dialplan show`), discarding every prior line. Repeated keys are now accumulated into a JSON array instead of being overwritten.
+-   Boxed the `AmiError` returned by the Actix Web example's reconnect helper to satisfy Clippy's `result_large_err` lint.
+
+### Added
+
+-   `command_output: Option<Vec<String>>` field on `AmiResponse`, populated from all accumulated `Output` lines of a `Command` response (`fields["Output"]` is kept as the last-value `String` for backwards compatibility).
+
+### Changed
+
+-   Clearer diagnostics when a connection is lost during read: the `InternalConnectionLost` event and accompanying log now distinguish an EOF (server closed the connection) from an actual I/O error, and include the underlying error detail.
+
 ## [2.1.2] - 2026-07-22
 
 ### Fixed
