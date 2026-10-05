@@ -42,6 +42,10 @@ struct ConnectionStatus {
 #[derive(Deserialize)]
 struct ActionRequest {
     action: String,
+    // Note: We use HashMap here for the HTTP API because JSON objects don't support
+    // duplicate keys. The HashMap is converted to Vec when creating AmiAction::Custom.
+    // If you need duplicate keys (e.g., multiple Variable parameters), you'll need to
+    // make multiple API calls or use a different HTTP request format.
     params: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -71,9 +75,10 @@ async fn get_events(data: web::Data<AppState>) -> impl Responder {
 
 async fn post_action(data: web::Data<AppState>, req: web::Json<ActionRequest>) -> impl Responder {
     let manager = data.manager.lock().await;
+    let req = req.into_inner();
     let action = AmiAction::Custom {
-        action: req.action.clone(),
-        params: req.params.clone().unwrap_or_default(),
+        action: req.action,
+        params: req.params.unwrap_or_default().into_iter().collect(),
         action_id: None,
     };
 
@@ -125,7 +130,7 @@ async fn get_calls(data: web::Data<AppState>) -> impl Responder {
         let manager = data.manager.lock().await;
         let action = AmiAction::Custom {
             action: "CoreShowChannels".to_string(),
-            params: std::collections::HashMap::new(),
+            params: vec![],
             action_id: Some(action_id.clone()),
         };
 
